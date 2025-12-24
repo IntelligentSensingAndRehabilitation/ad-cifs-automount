@@ -23,6 +23,7 @@ AUTOFSD_DIR="/etc/auto.master.d"
 AUTOFSD_PREFIX="amgr"
 AUTOFS_ROOT_BASE="/autofs"
 GLOBAL_LINKER="/etc/profile.d/automount-links.sh"
+INSTALL_PATH="/usr/bin/automount-manager.sh"
 
 usage() {
   cat <<EOF
@@ -31,6 +32,7 @@ Usage:
   $SCRIPT_NAME del <name>
   $SCRIPT_NAME list
   $SCRIPT_NAME check [<name>]
+  $SCRIPT_NAME install
 
 Arguments:
   <name>       Short name for the mount (letters/numbers/_/-), e.g. cottonlab
@@ -62,6 +64,16 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 need_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Must run as root. Try: sudo $SCRIPT_NAME ..."
+}
+
+script_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$0"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f "$0"
+  else
+    echo "$0"
+  fi
 }
 
 backup_file() {
@@ -301,6 +313,16 @@ for path in "$AUTOHOME"/*; do
 done
 EOF
   chmod 644 "$GLOBAL_LINKER"
+}
+
+install_script() {
+  need_root
+  local src target
+  src="$(script_path)"
+  target="$INSTALL_PATH"
+  cp "$src" "$target"
+  chmod 755 "$target"
+  echo "Installed $target from $src"
 }
 
 add_mount() {
@@ -558,6 +580,10 @@ main() {
     list|ls)
       [[ $# -eq 1 ]] || { usage; exit 1; }
       list_mounts
+      ;;
+    install)
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      install_script
       ;;
     check)
       if [[ $# -gt 2 ]]; then usage; exit 1; fi
