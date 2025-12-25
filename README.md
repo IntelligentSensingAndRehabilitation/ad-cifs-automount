@@ -57,3 +57,5 @@ sudo ./automount-manager.sh del Lab1
 ## Notes
 - Run the script with sudo/root; system file edits and autofs restart require it.
 - If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).***
+
+## Author: Evgeny Samorokov <team@itcraftworks.com>
