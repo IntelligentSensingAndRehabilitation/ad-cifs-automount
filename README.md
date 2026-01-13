@@ -37,6 +37,12 @@ sudo ./automount-manager.sh check         # all
 sudo ./automount-manager.sh check Lab1    # specific
 ```
 
+Deeper diagnostics for a specific mount:
+```bash
+sudo ./automount-manager.sh troubleshoot Lab1
+sudo ./automount-manager.sh troubleshoot Lab1 --user alice --key alice
+```
+
 Delete:
 ```bash
 sudo ./automount-manager.sh del Lab1
@@ -53,9 +59,10 @@ sudo ./automount-manager.sh del Lab1
 - “Required key not available”: ensure tickets go to keyring (`default_ccache_name = KEYRING:persistent:%{uid}`) and user has a fresh `kinit`.
 - “Invalid character … location …”: map must return only options/location (no key) and be executable.
 - Logs: `journalctl -u autofs -n 50` and `journalctl -k | grep -i cifs`.
+- Run `sudo ./automount-manager.sh troubleshoot <name>` to dump autofs maps, service logs, CIFS kernel info, and manual test commands.
 
 ## Notes
 - Run the script with sudo/root; system file edits and autofs restart require it.
-- If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).***
+- If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).
 
 ## Author: Evgeny Samorokov <team@itcraftworks.com>

@@ -34,6 +34,7 @@ Usage:
   $SCRIPT_NAME del <name>
   $SCRIPT_NAME list
   $SCRIPT_NAME check [<name>]
+  $SCRIPT_NAME troubleshoot <name> [--user <user>] [--key <key>]
   $SCRIPT_NAME install
 
 Arguments:
@@ -48,6 +49,10 @@ Options for 'add':
 Command 'check':
   With no <name>, validates overall config and all managed mounts.
   With <name>, validates only that mount.
+
+Command 'troubleshoot':
+  Deeper diagnostics for a specific mount. Optionally pass a user/key to
+  render the program map output and provide ready-to-run test commands.
 
 What it creates (default):
   Master map: ${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-<name>.autofs
@@ -244,6 +249,17 @@ ensure_ccache_keyring() {
       }
     }
   ' "$krb" > "${krb}.tmp" && mv "${krb}.tmp" "$krb"
+}
+
+section() {
+  echo
+  echo "== $* =="
+}
+
+extract_share_from_map() {
+  local map="$1"
+  [[ -f "$map" ]] || return 0
+  grep -E '^[[:space:]]*cifs_share=' "$map" | head -n1 | sed -E 's/^[^=]*=["'\'']?([^"'\'' ]+).*/\1/'
 }
 
 restart_autofs() {
@@ -454,8 +470,8 @@ list_mounts() {
     root="$(awk '{print $1}' "$m" | head -n1)"
     map="$(awk '{print $2}' "$m" | head -n1)"
     if [[ -f "$map" ]]; then
-      # Extract after ":" in the map line (the share)
-      share="$(grep -E '^[[:space:]]*\*' "$map" | head -n1 | sed -E 's/.*://')"
+      share="$(extract_share_from_map "$map")"
+      [[ -n "$share" ]] || share="(unknown)"
     else
       share="(missing map: $map)"
     fi
@@ -547,7 +563,7 @@ check_mount() {
 
   local root share
   root="$(awk '!/^#/ && NF>=2 {print $1; exit}' "$master" 2>/dev/null)"
-  share="$(grep -E '^[[:space:]]*\*' "$map" 2>/dev/null | head -n1 | sed -E 's/.*://')"
+  share="$(extract_share_from_map "$map")"
 
   [[ -n "$root" ]] && echo "  Root: $root" || echo "  Root: (unknown)"
   [[ -n "$share" ]] && echo "  Share: $share" || echo "  Share: (unknown)"
@@ -566,6 +582,125 @@ check_mount() {
   fi
 
   return $ok
+}
+
+troubleshoot_mount() {
+  need_root
+  local name="$1"; shift
+  validate_name "$name"
+
+  local user="" key=""
+  while (($# > 0)); do
+    case "$1" in
+      --user) user="$2"; shift 2;;
+      --key) key="$2"; shift 2;;
+      *) die "Unknown option: $1";;
+    esac
+  done
+
+  check_config
+  echo
+  check_mount "$name"
+
+  local master map root share host
+  master="${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-${name}.autofs"
+  map="/etc/auto.${name}"
+  root="$(awk '!/^#/ && NF>=2 {print $1; exit}' "$master" 2>/dev/null)"
+  share="$(extract_share_from_map "$map")"
+  host="$(echo "${share:-}" | sed -E 's|^//||; s|/.*||')"
+
+  section "map output"
+  if [[ -x "$map" ]]; then
+    local map_key="${key:-${user:-}}"
+    if [[ -n "$map_key" ]]; then
+      echo "Key: $map_key"
+      "$map" "$map_key" || echo "WARN: map command failed for key '$map_key'"
+    else
+      echo "INFO: provide --key or --user to render program map output."
+    fi
+  else
+    echo "WARN: map not executable or missing: $map"
+  fi
+
+  section "autofs maps (automount -m)"
+  if check_cmd automount; then
+    automount -m | sed -n '1,160p' || true
+  else
+    echo "WARN: automount not found"
+  fi
+
+  section "service logs"
+  if check_cmd journalctl; then
+    journalctl -u autofs -n 200 --no-pager || true
+  else
+    echo "WARN: journalctl not found"
+  fi
+
+  section "kernel CIFS logs"
+  dmesg -T 2>/dev/null | grep -iE 'cifs|smb' | tail -n 200 || echo "No CIFS logs in dmesg."
+
+  section "CIFS client info"
+  if [[ -r /proc/fs/cifs/SupportedDialects ]]; then
+    echo "SupportedDialects:"
+    cat /proc/fs/cifs/SupportedDialects
+  else
+    echo "WARN: /proc/fs/cifs/SupportedDialects not available"
+  fi
+  if [[ -r /proc/fs/cifs/Stats ]]; then
+    echo
+    echo "Stats:"
+    sed -n '1,120p' /proc/fs/cifs/Stats
+  fi
+  if [[ -r /proc/fs/cifs/DebugData ]]; then
+    echo
+    echo "DebugData (top):"
+    sed -n '1,120p' /proc/fs/cifs/DebugData
+  fi
+
+  section "time sync"
+  if check_cmd timedatectl; then
+    timedatectl status
+  else
+    echo "WARN: timedatectl not found"
+  fi
+
+  section "reachability"
+  if [[ -n "$host" ]]; then
+    getent hosts "$host" || echo "WARN: host not resolvable: $host"
+    if check_cmd nc; then
+      nc -z -w2 "$host" 445 >/dev/null 2>&1 && echo "TCP 445 OK: $host" || echo "WARN: TCP 445 failed: $host"
+    fi
+  else
+    echo "WARN: share host unknown; cannot probe DNS/TCP 445"
+  fi
+
+  section "manual tests"
+  if [[ -n "$user" ]]; then
+    echo "Kerberos ticket for $user:"
+    echo "  sudo -u $user klist"
+  else
+    echo "Kerberos ticket (run as AD user):"
+    echo "  klist"
+  fi
+
+  local test_key="${key:-${user:-<your-username-or-key>}}"
+  if [[ -n "$root" ]]; then
+    if [[ -n "$user" ]]; then
+      echo "Trigger autofs as $user:"
+      echo "  sudo -u $user ls ${root}/${test_key}"
+    else
+      echo "Trigger autofs as AD user:"
+      echo "  ls ${root}/${test_key}"
+    fi
+  fi
+
+  if [[ -n "$share" ]]; then
+    echo
+    echo "Manual mount test (temporary mountpoint):"
+    echo "  sudo mkdir -p /mnt/${name}-test"
+    echo "  sudo mount -t cifs -o sec=krb5,cruid=<uid>,vers=3.0 ${share} /mnt/${name}-test"
+    echo "  sudo umount /mnt/${name}-test"
+  fi
 }
 
 main() {
@@ -608,6 +743,10 @@ main() {
           done
         fi
       fi
+      ;;
+    troubleshoot|diag|debug)
+      [[ $# -ge 2 ]] || { usage; exit 1; }
+      troubleshoot_mount "$2" "${@:3}"
       ;;
     -h|--help|help|"")
       usage
