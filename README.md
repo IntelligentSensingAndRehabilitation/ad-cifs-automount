@@ -18,7 +18,7 @@ A single script (`automount-manager.sh`) to add/list/delete/check CIFS autofs mo
 ## Usage (as root)
 Add a mount (example Lab1):
 ```bash
-sudo ./automount-manager.sh add Lab1 //adfs1.itcraftworks.com/Lab1
+sudo ./automount-manager.sh add Lab1 //adhost.mydomain.local/Lab1
 ```
 This creates:
 - Master: `/etc/auto.master.d/amgr-Lab1.autofs` -> `program:/etc/auto.Lab1`
@@ -61,8 +61,30 @@ sudo ./automount-manager.sh del Lab1
 - Logs: `journalctl -u autofs -n 50` and `journalctl -k | grep -i cifs`.
 - Run `sudo ./automount-manager.sh troubleshoot <name>` to dump autofs maps, service logs, CIFS kernel info, and manual test commands.
 
+## Troubleshooting script (AD/SSSD + Kerberos CIFS)
+Use `troubleshoot-ad-autofs-cifs.sh` for a structured, read-only diagnosis of common AD/SSSD + autofs + CIFS problems.
+
+Run (no changes):
+```bash
+./troubleshoot-ad-autofs-cifs.sh --server-host hostname.mydomain.local --share //hostname.mydomain.local/CottonLab
+```
+
+Apply safe fixes (only nsswitch/auto.master/autofs OPTIONS):
+```bash
+sudo ./troubleshoot-ad-autofs-cifs.sh --server-host hostname.mydomain.local --fix
+```
+
+The script also prints a directed troubleshooting path for federated domain / Isilon cases:
+- Validate CIFS SPN for the exact hostname used in the share (`kvno cifs/<host>`).
+- Detect CNAMEs (Kerberos does not follow CNAMEs; mount using the SPN-bound hostname).
+- Confirm cross-domain Kerberos resolution.
+- Verify CIFS uses `sec=krb5` and the user’s KEYRING cache is populated.
+
+## Federated domain / Isilon notes
+If the client is in one AD domain and the share is hosted in a federated domain, failures are usually SPN/DNS-related (not script-related). The hostname used in the share must match the SPN in AD; CNAME aliases will break Kerberos unless a matching SPN exists for the alias.
+
 ## Notes
 - Run the script with sudo/root; system file edits and autofs restart require it.
 - If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).
 
-## Author: Evgeny Samorokov <team@itcraftworks.com>
+## Author: Evgeny Samorokov <evgeny_samorokov@questsys.com>

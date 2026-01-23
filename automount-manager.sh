@@ -15,7 +15,7 @@
 # - This script does NOT join the machine to AD or configure SSSD. It assumes Kerberos/SSSD is already working.
 # - Uses autofs maps under /etc/auto.master.d and /etc/auto.<name>
 #
-# Author: Evgeny Samorokov <team@itcraftworks.com>
+# Author: Evgeny Samorokov <evgeny_samorokov@questsys.com>
 
 set -euo pipefail
 
