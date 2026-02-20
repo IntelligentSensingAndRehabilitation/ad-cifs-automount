@@ -105,7 +105,7 @@ Arguments:
 
 Options for 'add':
   --root <path>     Autofs root directory for this mount (default: /autofs/<name>)
-  --timeout <sec>   Autofs timeout in seconds (default: 300)
+  --timeout <sec>   Autofs timeout in seconds (default: 43200)
   --no-ghost        Do not use --ghost (default: ghost enabled)
 ```
 

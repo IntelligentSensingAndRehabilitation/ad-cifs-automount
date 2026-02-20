@@ -134,18 +134,24 @@ fix_nsswitch_automount() {
   fi
 
   if echo "$line" | grep -qw files; then
-    status_line PASS "automount line includes files"
+    if [[ "$line" == "automount: files" ]]; then
+      status_line PASS "automount line is exactly 'automount: files'"
+    else
+      status_line WARN "automount line should be 'automount: files' for file-backed maps: $line"
+      if [[ "$DO_FIX" == "yes" && "$IS_ROOT" == "yes" ]]; then
+        sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' "$f"
+        status_line PASS "Updated automount line to 'automount: files'"
+      else
+        echo "Fix: sudo sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' $f"
+      fi
+    fi
   else
     status_line WARN "automount line missing files: $line"
     if [[ "$DO_FIX" == "yes" && "$IS_ROOT" == "yes" ]]; then
-      if echo "$line" | grep -qw sss; then
-        sed -i -E 's/^[[:space:]]*automount:.*/automount: files sss/' "$f"
-      else
-        sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' "$f"
-      fi
-      status_line PASS "Updated automount line to include files"
+      sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' "$f"
+      status_line PASS "Updated automount line to 'automount: files'"
     else
-      echo "Fix: sudo sed -i -E 's/^[[:space:]]*automount:.*/automount: files sss/' $f"
+      echo "Fix: sudo sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' $f"
     fi
   fi
 }

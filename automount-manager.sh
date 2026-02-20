@@ -43,7 +43,7 @@ Arguments:
 
 Options for 'add':
   --root <path>     Autofs root directory for this mount (default: ${AUTOFS_ROOT_BASE}/<name>)
-  --timeout <sec>   Autofs timeout in seconds (default: 300)
+  --timeout <sec>   Autofs timeout in seconds (default: 43200)
   --no-ghost        Do not use --ghost (default: ghost enabled)
 
 Command 'check':
@@ -148,14 +148,9 @@ ensure_nsswitch_automount_files() {
 
   local line
   line="$(grep -E '^[[:space:]]*automount:' "$f" | head -n1)"
-  if ! echo "$line" | grep -qw "files"; then
-    echo "Updating $f to include 'files' for automount maps"
-    # Replace line with "automount: files sss" if sss was present, else "automount: files"
-    if echo "$line" | grep -qw "sss"; then
-      sed -i -E 's/^[[:space:]]*automount:.*/automount: files sss/' "$f"
-    else
-      sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' "$f"
-    fi
+  if [[ "$line" != "automount: files" ]]; then
+    echo "Updating $f to 'automount: files' for file-backed autofs maps"
+    sed -i -E 's/^[[:space:]]*automount:.*/automount: files/' "$f"
   fi
 }
 
@@ -374,7 +369,7 @@ add_mount() {
   [[ "$cifs_share" =~ ^// ]] || die "CIFS share must start with // (example: //fs2.domain.local/Share)"
 
   local root="${AUTOFS_ROOT_BASE}/${name}"
-  local timeout="300"
+  local timeout="43200"
   local ghost="yes"
 
   while (($# > 0)); do

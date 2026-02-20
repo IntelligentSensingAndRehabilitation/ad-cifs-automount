@@ -95,12 +95,8 @@ ensure_automount_line() {
   if grep -qE '^[[:space:]]*automount:' "$f"; then
     local line
     line="$(grep -E '^[[:space:]]*automount:' "$f" | head -n1)"
-    if ! echo "$line" | grep -qw files; then
-      if echo "$line" | grep -qw sss; then
-        sed -i -E 's|^[[:space:]]*automount:.*|automount: files sss|' "$f"
-      else
-        sed -i -E 's|^[[:space:]]*automount:.*|automount: files|' "$f"
-      fi
+    if [[ "$line" != "automount: files" ]]; then
+      sed -i -E 's|^[[:space:]]*automount:.*|automount: files|' "$f"
     fi
   else
     echo "automount: files" >>"$f"
