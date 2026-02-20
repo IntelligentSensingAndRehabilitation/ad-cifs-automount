@@ -285,7 +285,12 @@ set_system_fqdn() {
 
 # Parse CLI args
 while (($# > 0)); do
-  case "$1" in
+  # Normalize common Unicode non-breaking spaces that can appear when pasting commands.
+  opt="$1"
+  opt="${opt#"$'\u00A0'"}"
+  opt="${opt#"$'\u2007'"}"
+  opt="${opt#"$'\u202F'"}"
+  case "$opt" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --computer-name) COMPUTER_NAME="${2:-}"; shift 2 ;;
     --allowed-groups) ALLOWED_GROUPS_RAW="${2:-}"; shift 2 ;;

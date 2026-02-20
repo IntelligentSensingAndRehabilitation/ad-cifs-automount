@@ -427,7 +427,7 @@ del_mount() {
   # Try to unmount any active autofs submounts for this root (best-effort).
   # Note: autofs will clean up, but we try to be neat.
   local root
-  root="$(awk '{print $1}' "$master" 2>/dev/null | head -n1 || true)"
+  root="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $1; exit}' "$master" 2>/dev/null || true)"
 
   if [[ -n "${root:-}" && -d "$root" ]]; then
     echo "Attempting to unmount $root ..."
@@ -467,8 +467,8 @@ list_mounts() {
   local m name root map share
   for m in "${masters[@]}"; do
     name="$(basename "$m" | sed -E "s/^${AUTOFSD_PREFIX}-//; s/\.autofs$//")"
-    root="$(awk '{print $1}' "$m" | head -n1)"
-    map="$(awk '{print $2}' "$m" | head -n1)"
+    root="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $1; exit}' "$m")"
+    map="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $2; exit}' "$m")"
     if [[ -f "$map" ]]; then
       share="$(extract_share_from_map "$map")"
       [[ -n "$share" ]] || share="(unknown)"
