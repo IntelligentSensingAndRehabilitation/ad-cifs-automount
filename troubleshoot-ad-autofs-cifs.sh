@@ -201,6 +201,211 @@ get_short_host() {
   echo "$host" | cut -d. -f1
 }
 
+get_domain_from_host() {
+  local host="$1"
+  if [[ "$host" == *.* ]]; then
+    echo "$host" | cut -d. -f2-
+  fi
+}
+
+domain_to_realm() {
+  local d="$1"
+  echo "${d^^}"
+}
+
+check_nss_identity_lines() {
+  local f="/etc/nsswitch.conf"
+  [[ -f "$f" ]] || { status_line FAIL "Missing $f"; return; }
+
+  local p g
+  p="$(grep -E '^[[:space:]]*passwd:' "$f" | head -n1 || true)"
+  g="$(grep -E '^[[:space:]]*group:' "$f" | head -n1 || true)"
+
+  if [[ -n "$p" ]] && echo "$p" | grep -qw sss; then
+    status_line PASS "passwd line includes sss"
+  else
+    status_line WARN "passwd line missing sss in $f"
+  fi
+
+  if [[ -n "$g" ]] && echo "$g" | grep -qw sss; then
+    status_line PASS "group line includes sss"
+  else
+    status_line WARN "group line missing sss in $f"
+  fi
+}
+
+check_krb5_conf() {
+  local f="/etc/krb5.conf"
+  local server_domain="$1"
+  local server_realm="$2"
+  [[ -f "$f" ]] || { status_line FAIL "Missing $f"; return; }
+
+  if grep -qiE '^[[:space:]]*default_ccache_name[[:space:]]*=[[:space:]]*KEYRING:persistent:%\{uid\}' "$f"; then
+    status_line PASS "krb5 default_ccache_name uses KEYRING:persistent:%{uid}"
+  else
+    status_line WARN "krb5 default_ccache_name not set to KEYRING:persistent:%{uid}"
+  fi
+
+  local local_domain local_realm
+  local_domain="$(hostname -d 2>/dev/null || true)"
+  local_realm="$(domain_to_realm "$local_domain")"
+  if [[ -n "$local_domain" ]]; then
+    if grep -qiE "^[[:space:]]*\\.${local_domain}[[:space:]]*=" "$f" && grep -qiE "^[[:space:]]*${local_domain}[[:space:]]*=" "$f"; then
+      status_line PASS "krb5 domain_realm has local domain mapping (${local_domain} -> ${local_realm})"
+    else
+      status_line WARN "krb5 missing local domain_realm mapping for ${local_domain}"
+    fi
+  else
+    status_line WARN "Cannot infer local domain from hostname -d"
+  fi
+
+  if [[ -n "$server_domain" ]]; then
+    if grep -qiE "^[[:space:]]*\\.${server_domain}[[:space:]]*=[[:space:]]*${server_realm}" "$f" && grep -qiE "^[[:space:]]*${server_domain}[[:space:]]*=[[:space:]]*${server_realm}" "$f"; then
+      status_line PASS "krb5 domain_realm has server domain mapping (${server_domain} -> ${server_realm})"
+    else
+      status_line WARN "krb5 missing/incorrect domain_realm mapping for ${server_domain} -> ${server_realm}"
+    fi
+  fi
+
+  if [[ -n "$server_realm" ]]; then
+    if grep -qiE "^[[:space:]]*${server_realm}[[:space:]]*=" "$f"; then
+      status_line PASS "krb5 has explicit [realms] entry for ${server_realm}"
+    else
+      status_line WARN "krb5 has no explicit [realms] entry for ${server_realm} (DNS KDC discovery may still work)"
+    fi
+  fi
+}
+
+check_resolver_and_kerberos_dns() {
+  local server_domain="$1"
+  local local_domain
+  local_domain="$(hostname -d 2>/dev/null || true)"
+
+  if [[ -f /etc/resolv.conf ]]; then
+    local ns_count search_line
+    ns_count="$(grep -Ec '^[[:space:]]*nameserver[[:space:]]+' /etc/resolv.conf || true)"
+    search_line="$(grep -E '^[[:space:]]*(search|domain)[[:space:]]+' /etc/resolv.conf | head -n1 || true)"
+    if [[ "${ns_count:-0}" -gt 0 ]]; then
+      status_line PASS "/etc/resolv.conf has nameserver entries (${ns_count})"
+    else
+      status_line WARN "/etc/resolv.conf has no nameserver entries"
+    fi
+    [[ -n "$search_line" ]] && status_line PASS "/etc/resolv.conf search/domain present: $search_line" || status_line WARN "/etc/resolv.conf has no search/domain line"
+  else
+    status_line FAIL "Missing /etc/resolv.conf"
+  fi
+
+  if have_cmd getent; then
+    if [[ -n "$local_domain" ]]; then
+      getent hosts "$local_domain" >/dev/null 2>&1 && status_line PASS "DNS resolves local domain token (${local_domain})" || status_line WARN "DNS did not resolve local domain token (${local_domain})"
+    fi
+    if [[ -n "$server_domain" ]]; then
+      getent hosts "$server_domain" >/dev/null 2>&1 && status_line PASS "DNS resolves server domain token (${server_domain})" || status_line WARN "DNS did not resolve server domain token (${server_domain})"
+    fi
+  fi
+
+  if have_cmd dig; then
+    if [[ -n "$local_domain" ]]; then
+      if dig +short "_kerberos._udp.${local_domain}" SRV | grep -q .; then
+        status_line PASS "Found SRV records for _kerberos._udp.${local_domain}"
+      else
+        status_line WARN "No SRV records for _kerberos._udp.${local_domain}"
+      fi
+    fi
+    if [[ -n "$server_domain" ]]; then
+      if dig +short "_kerberos._udp.${server_domain}" SRV | grep -q .; then
+        status_line PASS "Found SRV records for _kerberos._udp.${server_domain}"
+      else
+        status_line WARN "No SRV records for _kerberos._udp.${server_domain}"
+      fi
+    fi
+  else
+    status_line WARN "dig not found (install dnsutils for SRV checks)"
+  fi
+}
+
+check_pam_sshd_file() {
+  local f="/etc/pam.d/sshd"
+  if [[ -f "$f" ]]; then
+    if grep -qE '^[[:space:]]*session[[:space:]]+.*pam_sss\.so' "$f"; then
+      status_line PASS "pam_sss.so session line present in $f"
+    else
+      status_line WARN "pam_sss.so session line missing in $f"
+    fi
+    if grep -qE '^[[:space:]]*session[[:space:]]+.*pam_keyinit\.so' "$f" || grep -qE '^[[:space:]]*session[[:space:]]+.*pam_keyinit\.so' /etc/pam.d/common-session; then
+      status_line PASS "pam_keyinit.so session line present (sshd/common-session)"
+    else
+      status_line WARN "pam_keyinit.so not found in sshd/common-session"
+    fi
+  else
+    status_line WARN "Missing $f"
+  fi
+}
+
+check_amgr_map_files() {
+  local map_name="$1"
+  local checked_any="no"
+
+  if [[ -n "$map_name" && -f "/etc/auto.${map_name}" ]]; then
+    checked_any="yes"
+    check_single_map_file "/etc/auto.${map_name}"
+  fi
+
+  if [[ -d /etc/auto.master.d ]]; then
+    shopt -s nullglob
+    local masters=(/etc/auto.master.d/amgr-*.autofs)
+    shopt -u nullglob
+    if ((${#masters[@]} > 0)); then
+      local m
+      for m in "${masters[@]}"; do
+        checked_any="yes"
+        check_single_master_file "$m"
+      done
+    fi
+  fi
+
+  if [[ "$checked_any" == "no" ]]; then
+    status_line WARN "No automount-manager files found under /etc/auto.master.d or /etc/auto.<name>"
+  fi
+}
+
+check_single_master_file() {
+  local f="$1"
+  local line root mapref
+  line="$(awk '!/^[[:space:]]*#/ && NF>=2 {print; exit}' "$f" 2>/dev/null || true)"
+  if [[ -z "$line" ]]; then
+    status_line WARN "No usable autofs entry in $f"
+    return
+  fi
+  root="$(echo "$line" | awk '{print $1}')"
+  mapref="$(echo "$line" | awk '{print $2}')"
+  [[ -n "$root" ]] && status_line PASS "Master root in $f: $root" || status_line WARN "Cannot parse root in $f"
+  if [[ "$mapref" =~ ^program:/etc/auto\. ]]; then
+    status_line PASS "Master map reference is program map in $f: $mapref"
+  else
+    status_line WARN "Master map reference not program:/etc/auto.* in $f: ${mapref:-<empty>}"
+  fi
+}
+
+check_single_map_file() {
+  local f="$1"
+  if [[ ! -f "$f" ]]; then
+    status_line WARN "Missing map file $f"
+    return
+  fi
+
+  if [[ -x "$f" ]]; then
+    status_line PASS "Program map executable: $f"
+  else
+    status_line WARN "Program map not executable: $f"
+  fi
+
+  grep -q 'sec=krb5' "$f" && status_line PASS "$f uses sec=krb5" || status_line WARN "$f missing sec=krb5"
+  grep -q 'multiuser' "$f" && status_line PASS "$f uses multiuser" || status_line WARN "$f missing multiuser"
+  grep -q 'cruid=' "$f" && status_line PASS "$f uses cruid=" || status_line WARN "$f missing cruid="
+  grep -q 'vers=3.0' "$f" && status_line PASS "$f uses vers=3.0" || status_line WARN "$f missing vers=3.0"
+}
+
 section "Package checks"
 for p in sssd realmd adcli krb5-user cifs-utils keyutils autofs; do
   pkg_check "$p"
@@ -253,6 +458,7 @@ if [[ -f /etc/pam.d/common-session ]]; then
     echo "Suggestion: use 'session required pam_sss.so' or add to sshd PAM"
   fi
 fi
+check_pam_sshd_file
 
 section "SSSD checks"
 SSSD_CONF="/etc/sssd/sssd.conf"
@@ -288,6 +494,12 @@ if [[ -f "$SSSD_CONF" ]]; then
 else
   status_line FAIL "Missing $SSSD_CONF"
 fi
+
+section "Critical file checks"
+SERVER_DOMAIN="$(get_domain_from_host "$SERVER_HOST")"
+SERVER_REALM="$(domain_to_realm "$SERVER_DOMAIN")"
+check_krb5_conf "$SERVER_DOMAIN" "$SERVER_REALM"
+check_nss_identity_lines
 
 section "Kerberos checks (user-level)"
 if have_cmd klist; then
@@ -362,10 +574,12 @@ if [[ -n "$SHARE" ]]; then
     status_line PASS "Share host matches server-host"
   fi
 fi
+check_resolver_and_kerberos_dns "$SERVER_DOMAIN"
 
 section "autofs checks"
 fix_nsswitch_automount
 fix_auto_master_include
+check_amgr_map_files "$MAP_NAME"
 
 if [[ -f /etc/auto.master ]]; then
   map_file=""
