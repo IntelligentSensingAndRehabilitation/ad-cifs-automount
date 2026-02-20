@@ -273,6 +273,15 @@ restart_autofs() {
   systemctl --no-pager --full status autofs | sed -n '1,12p' || true
 }
 
+remove_inline_master_entries_for_map() {
+  local map="$1"
+  local master="/etc/auto.master"
+  [[ -f "$master" ]] || return 0
+  backup_file "$master"
+  # Remove non-comment lines that reference this map path (legacy layout support).
+  sed -i -E "\|^[[:space:]]*[^#].*[[:space:]](program:)?${map}[[:space:]]|d" "$master"
+}
+
 mk_master_map_file() {
   local name="$1" root="$2" timeout="$3" ghost="$4"
   local master="${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-${name}.autofs"
@@ -432,6 +441,7 @@ del_mount() {
 
   local master="${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-${name}.autofs"
   local map="/etc/auto.${name}"
+  local legacy_profile="/etc/profile.d/${AUTOFSD_PREFIX}-${name}.sh"
 
   [[ -e "$master" || -e "$map" ]] || die "No such mount '${name}' (missing ${master} and ${map})."
 
@@ -439,6 +449,7 @@ del_mount() {
   # Note: autofs will clean up, but we try to be neat.
   local root
   root="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $1; exit}' "$master" 2>/dev/null || true)"
+  [[ -n "${root:-}" ]] || root="${AUTOFS_ROOT_BASE}/${name}"
 
   if [[ -n "${root:-}" && -d "$root" ]]; then
     echo "Attempting to unmount $root ..."
@@ -447,6 +458,8 @@ del_mount() {
 
   echo "Removing autofs mount '${name}'..."
   rm -f "$master" "$map"
+  rm -f "$legacy_profile"
+  remove_inline_master_entries_for_map "$map"
 
   echo "Restarting autofs..."
   restart_autofs
@@ -458,6 +471,14 @@ del_mount() {
       echo "NOTE: Root directory still exists: $root"
       echo "      Remove it manually if empty: sudo rmdir '$root'"
     fi
+  fi
+
+  # If no managed mounts remain, remove the shared linker script artifact.
+  local remaining
+  remaining=( "${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-"*.autofs )
+  if [[ "${remaining[0]}" == "${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-*.autofs" ]]; then
+    rm -f "$GLOBAL_LINKER"
+    echo "Removed global linker script: $GLOBAL_LINKER"
   fi
 }
 
@@ -475,13 +496,15 @@ list_mounts() {
   printf "%-20s %-30s %-45s\n" "NAME" "ROOT" "SHARE"
   printf "%-20s %-30s %-45s\n" "----" "----" "-----"
 
-  local m name root map share
+  local m name root map map_path share
   for m in "${masters[@]}"; do
     name="$(basename "$m" | sed -E "s/^${AUTOFSD_PREFIX}-//; s/\.autofs$//")"
     root="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $1; exit}' "$m")"
     map="$(awk '!/^[[:space:]]*#/ && NF>=2 {print $2; exit}' "$m")"
-    if [[ -f "$map" ]]; then
-      share="$(extract_share_from_map "$map")"
+    map_path="$map"
+    [[ "$map_path" == program:* ]] && map_path="${map_path#program:}"
+    if [[ -f "$map_path" ]]; then
+      share="$(extract_share_from_map "$map_path")"
       [[ -n "$share" ]] || share="(unknown)"
     else
       share="(missing map: $map)"
