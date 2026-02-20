@@ -19,13 +19,14 @@
 
 set -euo pipefail
 
-SCRIPT_NAME="$(basename "$0")"
+#SCRIPT_NAME="$(basename "$0")"
 
 AUTOFSD_DIR="/etc/auto.master.d"
 AUTOFSD_PREFIX="amgr"
 AUTOFS_ROOT_BASE="/autofs"
 GLOBAL_LINKER="/etc/profile.d/automount-links.sh"
-INSTALL_PATH="/usr/bin/automount-manager.sh"
+SCRIPT_NAME="automount-manager.sh"
+INSTALL_PATH="/usr/bin/$SCRIPT_NAME"
 
 usage() {
   cat <<EOF
@@ -80,11 +81,11 @@ need_root() {
 
 script_path() {
   if command -v realpath >/dev/null 2>&1; then
-    realpath "$0"
+    realpath ./"$0"
   elif command -v readlink >/dev/null 2>&1; then
-    readlink -f "$0"
+    readlink -f ./"$0"
   else
-    echo "$0"
+    echo ./"$0"
   fi
 }
 
