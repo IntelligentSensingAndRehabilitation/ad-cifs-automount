@@ -35,7 +35,7 @@ Usage:
   $SCRIPT_NAME list
   $SCRIPT_NAME check [<name>]
   $SCRIPT_NAME troubleshoot <name> [--user <user>] [--key <key>]
-  $SCRIPT_NAME install
+  $SCRIPT_NAME install [--target <path>]
 
 Arguments:
   <name>       Short name for the mount (letters/numbers/_/-), e.g. cottonlab
@@ -53,6 +53,11 @@ Command 'check':
 Command 'troubleshoot':
   Deeper diagnostics for a specific mount. Optionally pass a user/key to
   render the program map output and provide ready-to-run test commands.
+
+Command 'install':
+  Installs script to ${INSTALL_PATH} by default.
+  Override destination:
+    $SCRIPT_NAME install --target /usr/local/bin/automount-manager.sh
 
 What it creates (default):
   Master map: ${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-<name>.autofs
@@ -337,8 +342,14 @@ install_script() {
   need_root
   local src target
   src="$(script_path)"
-  target="$INSTALL_PATH"
-  cp "$src" "$target"
+  target="${1:-$INSTALL_PATH}"
+  mkdir -p "$(dirname "$target")"
+  if [[ "$src" == "$target" ]]; then
+    chmod 755 "$target"
+    echo "Already installed at $target"
+    return 0
+  fi
+  cp -f "$src" "$target"
   chmod 755 "$target"
   echo "Installed $target from $src"
 }
@@ -719,8 +730,14 @@ main() {
       list_mounts
       ;;
     install)
-      [[ $# -eq 1 ]] || { usage; exit 1; }
-      install_script
+      if [[ $# -eq 1 ]]; then
+        install_script
+      elif [[ $# -eq 3 && "$2" == "--target" ]]; then
+        [[ -n "$3" ]] || die "Missing value for --target"
+        install_script "$3"
+      else
+        usage; exit 1
+      fi
       ;;
     check)
       if [[ $# -gt 2 ]]; then usage; exit 1; fi
