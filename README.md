@@ -87,4 +87,56 @@ If the client is in one AD domain and the share is hosted in a federated domain,
 - Run the script with sudo/root; system file edits and autofs restart require it.
 - If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).
 
+## Script Help (All `.sh` Files In This Repo)
+
+### `automount-manager.sh`
+```bash
+Usage:
+  automount-manager.sh add <name> <cifs_share> [--root <path>] [--timeout <sec>] [--no-ghost]
+  automount-manager.sh del <name>
+  automount-manager.sh list
+  automount-manager.sh check [<name>]
+  automount-manager.sh troubleshoot <name> [--user <user>] [--key <key>]
+  automount-manager.sh install
+
+Arguments:
+  <name>       Short name for the mount (letters/numbers/_/-), e.g. cottonlab
+  <cifs_share> CIFS share in the form //server.domain.local/Share or //server/Share
+
+Options for 'add':
+  --root <path>     Autofs root directory for this mount (default: /autofs/<name>)
+  --timeout <sec>   Autofs timeout in seconds (default: 300)
+  --no-ghost        Do not use --ghost (default: ghost enabled)
+```
+
+### `troubleshoot-ad-autofs-cifs.sh`
+```bash
+Usage:
+  troubleshoot-ad-autofs-cifs.sh --server-host <hostname> [--share <//host/share>] [--autofs-map-name <name>] [--fix] [--verbose]
+
+Examples:
+  troubleshoot-ad-autofs-cifs.sh --server-host hostname.mydomain.local --share //hostname.mydomain.local/MyShare
+  sudo troubleshoot-ad-autofs-cifs.sh --server-host hostname.mydomain.local --autofs-map-name MyShare --fix
+```
+
+### `ubuntu-ad-join.sh`
+Note: this script requires root and currently checks that before running `--help`.
+
+```bash
+Usage: ubuntu-ad-join.sh [options]
+
+Options:
+  --domain <domain>                 e.g. ric.org
+  --computer-name <name>            default: current hostname
+  --allowed-groups <list>           comma/semicolon-separated list
+  --ssh-allowed-groups <list>       comma/semicolon-separated list
+  --sudo-group <group>              AD group to grant sudo
+  --sudo-apps <list>                comma/semicolon-separated list of apps
+  --admin-user <user>               domain admin user (skip prompt)
+  --federated-domains <list>        extra kerberos domains, e.g. "smpp.local"
+  --set-fqdn                        set system hostname to FQDN before join
+  --fqdn <host.domain>              explicit FQDN (used with --set-fqdn)
+  -h, --help                        show this help
+```
+
 ## Author: Evgeny Samorokov <evgeny_samorokov@questsys.com>
