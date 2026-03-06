@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.2.0"
 
 SERVER_HOST=""
 SHARE=""
@@ -17,6 +18,9 @@ Usage:
 Examples:
   $SCRIPT_NAME --server-host hostname.mydomain.local --share //hostname.mydomain.local/MyShare
   sudo $SCRIPT_NAME --server-host hostname.mydomain.local --autofs-map-name MyShare --fix
+
+Version:
+  $SCRIPT_NAME --version
 EOF
 }
 
@@ -27,6 +31,7 @@ while (($# > 0)); do
     --autofs-map-name) MAP_NAME="$2"; shift 2;;
     --fix) DO_FIX="yes"; shift 1;;
     --verbose) VERBOSE="yes"; shift 1;;
+    --version|-V) echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"; exit 0;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1;;
   esac

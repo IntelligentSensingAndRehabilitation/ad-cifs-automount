@@ -43,11 +43,30 @@ sudo ./automount-manager.sh troubleshoot Lab1
 sudo ./automount-manager.sh troubleshoot Lab1 --user alice --key alice
 ```
 
+Run integrated debug (passes through to `troubleshoot-ad-autofs-cifs.sh`):
+```bash
+sudo ./automount-manager.sh --debug --server-host hostname.mydomain.local --share //hostname.mydomain.local/Lab1
+```
+
 Delete:
 ```bash
 sudo ./automount-manager.sh del Lab1
 ```
 (Attempts to unmount, removes master/map, restarts autofs, cleans root dir if empty.)
+
+Backup configs (archive):
+```bash
+sudo ./automount-manager.sh backup
+sudo ./automount-manager.sh backup --out /var/backups/automount-manager/custom-amgr-backup.tar.gz
+```
+Default output is a timestamped archive:
+`/var/backups/automount-manager/backup-YYYYmmddHHMMSS.tar.gz`
+
+Restore from backup archive:
+```bash
+sudo ./automount-manager.sh --restore /var/backups/automount-manager/backup-20260306120000.tar.gz
+```
+Legacy folder-style backups are also accepted by `--restore`.
 
 ## Per-user mount flow
 1) User SSHes in, gets a ticket: `kdestroy; kinit`.
@@ -86,6 +105,7 @@ If the client is in one AD domain and the share is hosted in a federated domain,
 ## Notes
 - Run the script with sudo/root; system file edits and autofs restart require it.
 - If your autofs version lacks program map support, update autofs or adjust to static maps (less ideal for per-user Kerberos).
+- All scripts support `--version` (or `-V` where noted) to print the script version.
 
 ## Script Help (All `.sh` Files In This Repo)
 
@@ -95,9 +115,13 @@ Usage:
   automount-manager.sh add <name> <cifs_share> [--root <path>] [--timeout <sec>] [--no-ghost]
   automount-manager.sh del <name>
   automount-manager.sh list
+  automount-manager.sh --version
+  automount-manager.sh backup [--out <path>]
+  automount-manager.sh --restore <backup_archive_or_dir>
+  automount-manager.sh --debug <troubleshooter_args...>
   automount-manager.sh check [<name>]
   automount-manager.sh troubleshoot <name> [--user <user>] [--key <key>]
-  automount-manager.sh install
+  automount-manager.sh install [--target <path>]
 
 Arguments:
   <name>       Short name for the mount (letters/numbers/_/-), e.g. cottonlab
@@ -107,12 +131,24 @@ Options for 'add':
   --root <path>     Autofs root directory for this mount (default: /autofs/<name>)
   --timeout <sec>   Autofs timeout in seconds (default: 43200)
   --no-ghost        Do not use --ghost (default: ghost enabled)
+
+Command 'backup':
+  Creates a timestamped .tar.gz backup under /var/backups/automount-manager by default.
+  --out can be either a directory or a full archive filename (*.tar.gz or *.tgz).
+
+Flag '--restore':
+  Restores from a backup archive (.tar.gz), or from a legacy backup directory.
+
+Flag '--debug':
+  Runs troubleshoot-ad-autofs-cifs.sh from the same directory as automount-manager.sh.
+  All additional arguments are passed through as-is.
 ```
 
 ### `troubleshoot-ad-autofs-cifs.sh`
 ```bash
 Usage:
   troubleshoot-ad-autofs-cifs.sh --server-host <hostname> [--share <//host/share>] [--autofs-map-name <name>] [--fix] [--verbose]
+  troubleshoot-ad-autofs-cifs.sh --version
 
 Examples:
   troubleshoot-ad-autofs-cifs.sh --server-host hostname.mydomain.local --share //hostname.mydomain.local/MyShare
@@ -136,6 +172,7 @@ Options:
   --federated-domains <list>        extra kerberos domains, e.g. "smpp.local"
   --set-fqdn                        set system hostname to FQDN before join
   --fqdn <host.domain>              explicit FQDN (used with --set-fqdn)
+  -V, --version                     show script version
   -h, --help                        show this help
 ```
 

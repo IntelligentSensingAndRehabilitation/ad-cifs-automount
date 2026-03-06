@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.2.0"
 
 # Variables - can be set via CLI
 DOMAIN=""                 # e.g. ric.org
@@ -30,6 +31,7 @@ Options:
   --federated-domains <list>        extra kerberos domains, e.g. "smpp.local"
   --set-fqdn                        set system hostname to FQDN before join
   --fqdn <host.domain>              explicit FQDN (used with --set-fqdn)
+  -V, --version                     show script version
   -h, --help                        show this help
 EOF
 }
@@ -276,6 +278,16 @@ set_system_fqdn() {
   hostnamectl set-hostname "$fqdn"
 }
 
+# Allow version output without requiring root.
+for arg in "$@"; do
+  case "$arg" in
+    -V|--version)
+      echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+      exit 0
+      ;;
+  esac
+done
+
 # Root check
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Please run this script as root."
 
@@ -297,6 +309,7 @@ while (($# > 0)); do
     --federated-domains) FEDERATED_DOMAINS_RAW="${2:-}"; shift 2 ;;
     --set-fqdn) SET_FQDN="yes"; shift 1 ;;
     --fqdn) FQDN_OVERRIDE="${2:-}"; shift 2 ;;
+    -V|--version) echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
   esac

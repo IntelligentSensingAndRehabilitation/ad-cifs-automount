@@ -20,6 +20,8 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
+SCRIPT_VERSION="1.2.0"
+TROUBLESHOOT_SCRIPT_NAME="troubleshoot-ad-autofs-cifs.sh"
 
 AUTOFSD_DIR="/etc/auto.master.d"
 AUTOFSD_PREFIX="amgr"
@@ -33,6 +35,10 @@ Usage:
   $SCRIPT_NAME add <name> <cifs_share> [--root <path>] [--timeout <sec>] [--no-ghost]
   $SCRIPT_NAME del <name>
   $SCRIPT_NAME list
+  $SCRIPT_NAME --version
+  $SCRIPT_NAME backup [--out <path>]
+  $SCRIPT_NAME --restore <backup_archive_or_dir>
+  $SCRIPT_NAME --debug <troubleshooter_args...>
   $SCRIPT_NAME check [<name>]
   $SCRIPT_NAME troubleshoot <name> [--user <user>] [--key <key>]
   $SCRIPT_NAME install [--target <path>]
@@ -49,6 +55,22 @@ Options for 'add':
 Command 'check':
   With no <name>, validates overall config and all managed mounts.
   With <name>, validates only that mount.
+
+Command 'backup':
+  Creates a timestamped .tar.gz backup of all solution-related configs and managed files.
+  Default output root: /var/backups/automount-manager
+  Output example: /var/backups/automount-manager/backup-YYYYmmddHHMMSS.tar.gz
+
+Flag '--restore':
+  Restores files from a previously created backup archive (.tar.gz).
+  Legacy folder backups are also supported.
+  Example:
+    $SCRIPT_NAME --restore /var/backups/automount-manager/backup-20260306120000.tar.gz
+
+Flag '--debug':
+  Calls ${TROUBLESHOOT_SCRIPT_NAME} installed next to this script.
+  Passes all arguments through, example:
+    $SCRIPT_NAME --debug --server-host hostname.mydomain.local --share //hostname.mydomain.local/MyShare
 
 Command 'troubleshoot':
   Deeper diagnostics for a specific mount. Optionally pass a user/key to
@@ -88,12 +110,129 @@ script_path() {
   fi
 }
 
+troubleshoot_script_path() {
+  local self_dir
+  self_dir="$(dirname "$(script_path)")"
+  echo "${self_dir}/${TROUBLESHOOT_SCRIPT_NAME}"
+}
+
 backup_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
   local ts
   ts="$(date +%Y%m%d%H%M%S)"
   cp -n "$f" "${f}.bak-${ts}" || true
+}
+
+backup_confis() {
+  need_root
+  check_cmd tar || die "'tar' is required for archive backups"
+  check_cmd mktemp || die "'mktemp' is required for archive backups"
+
+  local out_root="/var/backups/automount-manager"
+  while (($# > 0)); do
+    case "$1" in
+      --out) out_root="$2"; shift 2;;
+      *) die "Unknown option: $1";;
+    esac
+  done
+
+  local ts backup_dir archive_path stage_dir
+  ts="$(date +%Y%m%d%H%M%S)"
+  if [[ "$out_root" == *.tar.gz || "$out_root" == *.tgz ]]; then
+    archive_path="$out_root"
+    mkdir -p "$(dirname "$archive_path")"
+  else
+    backup_dir="$out_root"
+    mkdir -p "$backup_dir"
+    archive_path="${backup_dir}/backup-${ts}.tar.gz"
+  fi
+
+  stage_dir="$(mktemp -d /tmp/automount-manager-backup.XXXXXX)"
+  trap 'rm -rf "$stage_dir"' RETURN
+
+  copy_one() {
+    local src="$1"
+    [[ -e "$src" ]] || return 0
+    local rel="${src#/}"
+    mkdir -p "${stage_dir}/$(dirname "$rel")"
+    cp -a "$src" "${stage_dir}/${rel}"
+  }
+
+  # Core files that make the solution work.
+  copy_one "$(script_path)"
+  copy_one "$INSTALL_PATH"
+  copy_one "/etc/auto.master"
+  copy_one "/etc/auto.master.d"
+  copy_one "/etc/nsswitch.conf"
+  copy_one "/etc/default/autofs"
+  copy_one "/etc/krb5.conf"
+  copy_one "/etc/resolv.conf"
+  copy_one "/etc/sssd/sssd.conf"
+  copy_one "/etc/sssd/conf.d"
+  copy_one "/etc/pam.d/common-auth"
+  copy_one "/etc/pam.d/common-account"
+  copy_one "/etc/pam.d/common-session"
+  copy_one "/etc/pam.d/sshd"
+  copy_one "/etc/ssh/sshd_config"
+  copy_one "$GLOBAL_LINKER"
+
+  # Managed mount definitions and per-mount maps.
+  local masters
+  masters=( "${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-"*.autofs )
+  if [[ "${masters[0]}" != "${AUTOFSD_DIR}/${AUTOFSD_PREFIX}-*.autofs" ]]; then
+    local m name
+    for m in "${masters[@]}"; do
+      copy_one "$m"
+      name="$(basename "$m" | sed -E "s/^${AUTOFSD_PREFIX}-//; s/\.autofs$//")"
+      copy_one "/etc/auto.${name}"
+      copy_one "/etc/profile.d/${AUTOFSD_PREFIX}-${name}.sh"
+    done
+  fi
+
+  tar -czf "$archive_path" -C "$stage_dir" .
+  rm -rf "$stage_dir"
+  trap - RETURN
+
+  echo "Backup created:"
+  echo "  ${archive_path}"
+}
+
+restore_from_backup() {
+  need_root
+
+  local backup_src=""
+  while (($# > 0)); do
+    case "$1" in
+      --restore) backup_src="$2"; shift 2;;
+      *) die "Unknown option: $1";;
+    esac
+  done
+
+  [[ -n "$backup_src" ]] || die "Missing backup source. Use: $SCRIPT_NAME --restore <backup_archive_or_dir>"
+  [[ -e "$backup_src" ]] || die "Backup source not found: $backup_src"
+
+  if [[ -f "$backup_src" ]]; then
+    check_cmd tar || die "'tar' is required to restore archive backups"
+    echo "Restoring files from archive:"
+    echo "  ${backup_src}"
+    tar -xzf "$backup_src" -C /
+  elif [[ -d "$backup_src" ]]; then
+    if [[ ! -d "${backup_src}/etc" && ! -d "${backup_src}/usr" && ! -d "${backup_src}/var" ]]; then
+      die "Path does not look like an automount-manager backup: $backup_src"
+    fi
+    echo "Restoring files from legacy backup directory:"
+    echo "  ${backup_src}"
+    cp -a "${backup_src}/." /
+  else
+    die "Unsupported backup source: $backup_src"
+  fi
+
+  echo "Restarting services (best effort):"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl restart sssd 2>/dev/null && echo "  restarted sssd" || echo "  skipped sssd"
+  systemctl restart autofs 2>/dev/null && echo "  restarted autofs" || echo "  skipped autofs"
+  systemctl restart ssh 2>/dev/null && echo "  restarted ssh" || systemctl restart sshd 2>/dev/null && echo "  restarted sshd" || echo "  skipped ssh/sshd"
 }
 
 is_ubuntu() {
@@ -344,18 +483,44 @@ EOF
 
 install_script() {
   need_root
-  local src target
+  local src target src_dir tr_src tr_target
   src="$(script_path)"
+  src_dir="$(dirname "$src")"
+  tr_src="${src_dir}/${TROUBLESHOOT_SCRIPT_NAME}"
   target="${1:-$INSTALL_PATH}"
+  tr_target="$(dirname "$target")/${TROUBLESHOOT_SCRIPT_NAME}"
   mkdir -p "$(dirname "$target")"
+
+  [[ -f "$tr_src" ]] || die "Missing companion script: $tr_src"
+
   if [[ "$src" == "$target" ]]; then
     chmod 755 "$target"
     echo "Already installed at $target"
+    if [[ "$tr_src" == "$tr_target" ]]; then
+      chmod 755 "$tr_target"
+      echo "Companion script already in place: $tr_target"
+    else
+      cp -f "$tr_src" "$tr_target"
+      chmod 755 "$tr_target"
+      echo "Installed companion script: $tr_target"
+    fi
     return 0
   fi
   cp -f "$src" "$target"
   chmod 755 "$target"
+  cp -f "$tr_src" "$tr_target"
+  chmod 755 "$tr_target"
   echo "Installed $target from $src"
+  echo "Installed companion script: $tr_target"
+}
+
+run_debug() {
+  local tr
+  tr="$(troubleshoot_script_path)"
+  [[ -f "$tr" ]] || die "Troubleshooter script not found at $tr. Run: sudo $SCRIPT_NAME install"
+  [[ $# -gt 0 ]] || die "Missing debug arguments. Example: $SCRIPT_NAME --debug --server-host hostname.mydomain.local"
+  [[ -x "$tr" ]] || chmod 755 "$tr" 2>/dev/null || true
+  "$tr" "$@"
 }
 
 add_mount() {
@@ -735,6 +900,17 @@ troubleshoot_mount() {
 main() {
   local cmd="${1:-}"
   case "$cmd" in
+    --version|-V|version)
+      echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"
+      ;;
+    --debug|debug)
+      shift
+      run_debug "$@"
+      ;;
+    --restore)
+      [[ $# -eq 2 ]] || { usage; exit 1; }
+      restore_from_backup --restore "$2"
+      ;;
     add)
       [[ $# -ge 3 ]] || { usage; exit 1; }
       add_mount "$2" "$3" "${@:4}"
@@ -746,6 +922,14 @@ main() {
     list|ls)
       [[ $# -eq 1 ]] || { usage; exit 1; }
       list_mounts
+      ;;
+    backup)
+      shift
+      if [[ "${1:-}" == "--restore" ]]; then
+        restore_from_backup "$@"
+      else
+        backup_confis "$@"
+      fi
       ;;
     install)
       if [[ $# -eq 1 ]]; then
