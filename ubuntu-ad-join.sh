@@ -253,6 +253,7 @@ EOF
 }
 
 ensure_pam_session_lines() {
+  # pam_mkhomedir goes in common-session (applies to all login methods).
   local cs="/etc/pam.d/common-session"
   [[ -f "$cs" ]] || die "Missing $cs"
   backup_file "$cs"
@@ -260,11 +261,22 @@ ensure_pam_session_lines() {
   grep -qE '^[[:space:]]*session[[:space:]]+.*pam_mkhomedir\.so' "$cs" || \
     echo "session required pam_mkhomedir.so skel=/etc/skel/ umask=0022" >>"$cs"
 
-  grep -qE '^[[:space:]]*session[[:space:]]+.*pam_sss\.so' "$cs" || \
-    echo "session required pam_sss.so" >>"$cs"
+  # pam_sss.so and pam_keyinit.so go in the sshd PAM file, inserted before
+  # @include common-session so SSSD's session handler fires early.  Placing
+  # them here (rather than in common-session) avoids a race where SSSD's
+  # cache has expired and the PAM account check returns "error 4" on the
+  # first SSH connection after a period of inactivity.
+  local sshd="/etc/pam.d/sshd"
+  [[ -f "$sshd" ]] || die "Missing $sshd"
+  backup_file "$sshd"
 
-  grep -qE '^[[:space:]]*session[[:space:]]+.*pam_keyinit\.so' "$cs" || \
-    echo "session optional pam_keyinit.so force revoke" >>"$cs"
+  if ! grep -qE '^[[:space:]]*session[[:space:]]+.*pam_sss\.so' "$sshd"; then
+    sed -i '/@include common-session/i session    optional     pam_sss.so' "$sshd"
+  fi
+
+  if ! grep -qE '^[[:space:]]*session[[:space:]]+.*pam_keyinit\.so' "$sshd"; then
+    sed -i '/@include common-session/i session    optional     pam_keyinit.so force revoke' "$sshd"
+  fi
 }
 
 upsert_sshd_setting() {
