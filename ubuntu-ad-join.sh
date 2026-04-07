@@ -4,6 +4,32 @@ set -euo pipefail
 SCRIPT_NAME="$(basename "$0")"
 SCRIPT_VERSION="1.2.0"
 
+cleanup_on_error() {
+  local exit_code=$?
+  if (( exit_code != 0 )); then
+    echo "" >&2
+    echo "========================================" >&2
+    echo "SCRIPT FAILED (exit code $exit_code)" >&2
+    echo "========================================" >&2
+    echo "The script exited before completing. Config files that were modified" >&2
+    echo "have timestamped .bak-* backups alongside the originals." >&2
+    echo "" >&2
+    echo "To find all backups created during this run:" >&2
+    echo "  find /etc -name '*.bak-*' -newer /tmp/.adjoin-start-marker 2>/dev/null" >&2
+    echo "" >&2
+    echo "If SSH is broken, use console/IPMI access to restore:" >&2
+    echo "  cp /etc/ssh/sshd_config.bak-<timestamp> /etc/ssh/sshd_config" >&2
+    echo "  systemctl restart ssh" >&2
+    echo "" >&2
+    echo "To undo a partial domain join:" >&2
+    echo "  realm leave ${DOMAIN_LOWER:-<your-domain>} 2>/dev/null" >&2
+    echo "========================================" >&2
+  fi
+  rm -f /tmp/.adjoin-start-marker
+}
+trap cleanup_on_error EXIT
+touch /tmp/.adjoin-start-marker
+
 # Variables - can be set via CLI
 DOMAIN=""                 # e.g. ric.org
 COMPUTER_NAME=""          # default: current hostname
@@ -251,6 +277,17 @@ upsert_sshd_setting() {
 }
 
 restart_ssh_service() {
+  # Validate config BEFORE restarting — a bad config kills sshd and locks you out.
+  if have_cmd sshd; then
+    echo "Validating sshd config..."
+    if ! sshd -t 2>&1; then
+      echo "ERROR: sshd config validation failed. SSH was NOT restarted." >&2
+      echo "Fix /etc/ssh/sshd_config and restart manually: systemctl restart ssh" >&2
+      echo "Your current SSH session is still active — do not disconnect." >&2
+      return 1
+    fi
+  fi
+
   if systemctl list-unit-files --type=service | grep -q '^ssh\.service'; then
     systemctl restart ssh
   elif systemctl list-unit-files --type=service | grep -q '^sshd\.service'; then
@@ -344,6 +381,28 @@ echo "Computer Name: $COMPUTER_NAME"
 echo "Allowed login groups: ${ALLOWED_GROUPS[*]}"
 echo "SSH allowed groups: ${SSH_ALLOWED_GROUPS[*]}"
 
+# ── Preflight checks ─────────────────────────────────────────────
+
+# DNS check: can we resolve the domain?
+echo ""
+echo "Preflight: checking DNS for $DOMAIN_LOWER..."
+if ! host "$DOMAIN_LOWER" >/dev/null 2>&1 && ! nslookup "$DOMAIN_LOWER" >/dev/null 2>&1; then
+  die "Cannot resolve $DOMAIN_LOWER via DNS. Fix name resolution before joining."
+fi
+echo "  OK  DNS resolves $DOMAIN_LOWER"
+
+# Already joined? Warn before proceeding.
+if have_cmd realm && realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
+  echo ""
+  echo "WARNING: This machine appears to already be joined to $DOMAIN_LOWER."
+  echo "Re-running realm join will reset the machine account password in AD."
+  echo "This is usually safe, but if it fails mid-way the existing trust may break."
+  echo ""
+  read -r -p "Continue anyway? [y/N] " confirm
+  [[ "$confirm" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
+fi
+
+echo ""
 echo "Installing required packages..."
 apt-get update -y
 DEPS=(
@@ -438,12 +497,25 @@ restart_ssh_service
 
 if [[ -n "$SUDO_AD_GROUP" ]]; then
   SUDOERS_FILE="/etc/sudoers.d/$SUDO_AD_GROUP"
-  echo "%$SUDO_AD_GROUP ALL=(ALL) NOPASSWD: ${SUDO_APPS[*]}" >"$SUDOERS_FILE"
-  chmod 440 "$SUDOERS_FILE"
+  SUDOERS_TMP="${SUDOERS_FILE}.tmp"
+  echo "%$SUDO_AD_GROUP ALL=(ALL) NOPASSWD: ${SUDO_APPS[*]}" >"$SUDOERS_TMP"
+  chmod 440 "$SUDOERS_TMP"
   if have_cmd visudo; then
-    visudo -cf "$SUDOERS_FILE" >/dev/null
+    if ! visudo -cf "$SUDOERS_TMP" >/dev/null 2>&1; then
+      rm -f "$SUDOERS_TMP"
+      echo "ERROR: Generated sudoers file failed validation. Skipping sudoers setup." >&2
+      echo "You may need to configure /etc/sudoers.d/ manually." >&2
+    else
+      mv "$SUDOERS_TMP" "$SUDOERS_FILE"
+    fi
+  else
+    mv "$SUDOERS_TMP" "$SUDOERS_FILE"
   fi
 fi
+
+# Success — disarm the error trap.
+trap - EXIT
+rm -f /tmp/.adjoin-start-marker
 
 echo "=============================="
 echo "Active Directory join complete."
