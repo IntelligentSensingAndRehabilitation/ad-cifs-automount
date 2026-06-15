@@ -507,7 +507,6 @@ if [[ -f "$SSHD_CFG" ]]; then
   else
     status_line INFO "No AllowGroups line (expected — access is gated by sssd simple_allow_groups)"
   fi
-  local sssd_allow
   sssd_allow="$(grep -Ei '^[[:space:]]*simple_allow_groups' /etc/sssd/sssd.conf 2>/dev/null | tail -n1 || true)"
   [[ -n "$sssd_allow" ]] && status_line PASS "sssd ${sssd_allow# }" || status_line WARN "No simple_allow_groups in sssd.conf (login access may be unrestricted or denied)"
 
