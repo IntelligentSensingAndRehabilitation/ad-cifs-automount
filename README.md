@@ -25,14 +25,17 @@ This is the full end-to-end process for joining a new Ubuntu machine to the ric.
 sudo ./ubuntu-ad-join.sh \
   --domain ric.org \
   --allowed-groups "FS_CottonLab_Read_Write,domain admins,_svc_CottonLab" \
-  --ssh-allowed-groups "FS_CottonLab_Read_Write,domain admins,_svc_CottonLab" \
   --sudo-group "domain admins" \
-  --federated-domains "smpp.local" \
   --admin-user Administrator \
   --set-fqdn
 ```
 
-This handles: package installation, realm join, SSSD config, krb5.conf (keyring + domain_realm for both ric.org and smpp.local), nsswitch, PAM session lines (mkhomedir + keyinit), sshd config (GSSAPI + UsePAM), and autofs prerequisites.
+This handles: package installation, realm join, SSSD config (`access_provider=simple` + `simple_allow_groups` from `--allowed-groups`, which is what gates login), krb5.conf (keyring + domain_realm), nsswitch, PAM session lines (mkhomedir + keyinit), sshd config (GSSAPI + UsePAM), and autofs prerequisites.
+
+**Notes:**
+- **Computer name ≤ 15 chars.** AD caps the computer (NetBIOS) name at 15 characters. If the hostname is longer, pass a short one with `--computer-name <name>` (e.g. `--computer-name jc-aurora`) — the script preflights this and fails fast with a clear message otherwise.
+- **`--federated-domains` is optional** and only needed when a share lives in a *different* Kerberos realm than the client. As of the May 2026 maintenance, `fs2` authenticates under **RIC.ORG**, so the CottonLab mount uses `//fs2.ric.org/CottonLab` and needs no federated config. (`fs2.smpp.local` still resolves for legacy mounts; use `--federated-domains "smpp.local"` only if you specifically need the SMPP.LOCAL realm.)
+- **Access control is via SSSD, not sshd.** The script does not write an sshd `AllowGroups` line (sshd matches it case-sensitively, but SSSD lowercases AD group names — a mismatch that silently locks out AD users). Login is gated by `simple_allow_groups` instead. Local accounts (e.g. an `itadmin` in `sudo`) authenticate via local PAM and keep SSH access without being listed anywhere.
 
 **Interactive prompts during this step:**
 
@@ -62,7 +65,7 @@ sudo ./automount-manager.sh install
 ### Step 4: Add the CottonLab mount
 
 ```bash
-sudo automount-manager.sh add CottonLab //fs2.smpp.local/CottonLab
+sudo automount-manager.sh add CottonLab //fs2.ric.org/CottonLab
 ```
 
 ### Step 5: Verify
@@ -78,6 +81,13 @@ klist
 ls /autofs/CottonLab/$USER
 ls ~/CottonLab
 ```
+
+**Kerberos tickets and login method.** The CIFS mount is `sec=krb5`, so the user needs a ticket in their keyring (`KEYRING:persistent:<uid>`). Whether a ticket is obtained automatically depends on how they log in:
+
+- **Password login** (`pam_sss`) → SSSD does the `kinit` for you and caches the ticket → the automount works with **no manual step**. This is the recommended default for users.
+- **SSH key, or GSSAPI without delegation** → identity is proven but no ticket is placed on the server → the user must run `kinit`, or enable **GSSAPI credential delegation** client-side (`GSSAPIDelegateCredentials yes`, connecting by FQDN) to forward their ticket automatically.
+
+Tickets expire (~10 h); the mount goes stale until the next login/`kinit`.
 
 ### Step 6: Backup the working config
 
@@ -241,9 +251,8 @@ Usage: ubuntu-ad-join.sh [options]
 
 Options:
   --domain <domain>                 e.g. ric.org
-  --computer-name <name>            default: current hostname
-  --allowed-groups <list>           comma/semicolon-separated list
-  --ssh-allowed-groups <list>       comma/semicolon-separated list
+  --computer-name <name>            default: current hostname; AD limit is 15 chars
+  --allowed-groups <list>           comma/semicolon-separated AD groups (gates login)
   --sudo-group <group>              AD group to grant sudo
   --sudo-apps <list>                comma/semicolon-separated list of apps
   --admin-user <user>               domain admin user (skip prompt)

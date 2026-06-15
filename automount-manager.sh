@@ -20,7 +20,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 TROUBLESHOOT_SCRIPT_NAME="troubleshoot-ad-autofs-cifs.sh"
 
 AUTOFSD_DIR="/etc/auto.master.d"
@@ -119,9 +119,10 @@ troubleshoot_script_path() {
 backup_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
-  local ts
+  local ts bak
   ts="$(date +%Y%m%d%H%M%S)"
-  cp -n "$f" "${f}.bak-${ts}" || true
+  bak="${f}.bak-${ts}"
+  [[ -e "$bak" ]] || cp "$f" "$bak" || true
 }
 
 backup_confis() {

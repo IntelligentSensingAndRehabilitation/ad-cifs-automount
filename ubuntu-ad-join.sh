@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 
 cleanup_on_error() {
   local exit_code=$?
@@ -34,7 +34,6 @@ touch /tmp/.adjoin-start-marker
 DOMAIN=""                 # e.g. ric.org
 COMPUTER_NAME=""          # default: current hostname
 ALLOWED_GROUPS_RAW=""     # comma/semicolon-separated list
-SSH_ALLOWED_GROUPS_RAW="" # optional; defaults to ALLOWED_GROUPS_RAW
 SUDO_AD_GROUP=""          # optional; AD group to grant sudo
 SUDO_APPS_RAW=""          # optional; comma/semicolon-separated list of apps
 ADMIN_USER=""             # optional; if empty, prompt
@@ -48,14 +47,15 @@ Usage: $SCRIPT_NAME [options]
 
 Options:
   --domain <domain>                 e.g. ric.org
-  --computer-name <name>            default: current hostname
-  --allowed-groups <list>           comma/semicolon-separated list
-  --ssh-allowed-groups <list>       comma/semicolon-separated list
+  --computer-name <name>            default: current hostname; AD limit is 15 chars
+  --allowed-groups <list>           comma/semicolon-separated AD groups; gates login
+                                    via SSSD simple_allow_groups (the access control)
   --sudo-group <group>              AD group to grant sudo
   --sudo-apps <list>                comma/semicolon-separated list of apps
   --admin-user <user>               domain admin user (skip prompt)
   --federated-domains <list>        extra kerberos domains, e.g. "smpp.local"
   --set-fqdn                        set system hostname to FQDN before join
+                                    (omit on Kubernetes nodes — renames the node)
   --fqdn <host.domain>              explicit FQDN (used with --set-fqdn)
   -V, --version                     show script version
   -h, --help                        show this help
@@ -68,9 +68,10 @@ have_cmd() { command -v "$1" >/dev/null 2>&1; }
 backup_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
-  local ts
+  local ts bak
   ts="$(date +%Y%m%d%H%M%S)"
-  cp -n "$f" "${f}.bak-${ts}" || true
+  bak="${f}.bak-${ts}"
+  [[ -e "$bak" ]] || cp "$f" "$bak" || true
 }
 
 trim_ws() {
@@ -92,12 +93,6 @@ parse_list() {
     trimmed="$(trim_ws "$part")"
     [[ -n "$trimmed" ]] && out+=("$trimmed")
   done
-}
-
-escape_allowgroup() {
-  local s="$1"
-  s="${s// /\\ }"
-  printf '%s' "$s"
 }
 
 ensure_nss_token() {
@@ -300,12 +295,19 @@ restart_ssh_service() {
     fi
   fi
 
-  if systemctl list-unit-files --type=service | grep -q '^ssh\.service'; then
-    systemctl restart ssh
-  elif systemctl list-unit-files --type=service | grep -q '^sshd\.service'; then
-    systemctl restart sshd
+  # Resolve the SSH unit robustly. Parsing `list-unit-files` output is fragile
+  # (column formatting, socket activation). `systemctl cat` succeeds for real
+  # units and aliases alike. Ubuntu 22.04+ may drive SSH via ssh.socket rather
+  # than a long-running ssh.service, so detect and prefer the socket when active.
+  local ssh_unit="" u
+  for u in ssh.service sshd.service ssh.socket; do
+    if systemctl cat "$u" >/dev/null 2>&1; then ssh_unit="$u"; break; fi
+  done
+  [[ -n "$ssh_unit" ]] || die "No ssh/sshd systemd unit found (is openssh-server installed?)"
+  if systemctl cat ssh.socket >/dev/null 2>&1 && systemctl is-active --quiet ssh.socket; then
+    systemctl restart ssh.socket
   else
-    die "Neither ssh.service nor sshd.service found"
+    systemctl restart "$ssh_unit"
   fi
 }
 
@@ -351,7 +353,6 @@ while (($# > 0)); do
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --computer-name) COMPUTER_NAME="${2:-}"; shift 2 ;;
     --allowed-groups) ALLOWED_GROUPS_RAW="${2:-}"; shift 2 ;;
-    --ssh-allowed-groups) SSH_ALLOWED_GROUPS_RAW="${2:-}"; shift 2 ;;
     --sudo-group) SUDO_AD_GROUP="${2:-}"; shift 2 ;;
     --sudo-apps) SUDO_APPS_RAW="${2:-}"; shift 2 ;;
     --admin-user) ADMIN_USER="${2:-}"; shift 2 ;;
@@ -373,25 +374,19 @@ COMPUTER_NAME="${COMPUTER_NAME:-$(hostname)}"
 JOIN_COMPUTER_NAME="$COMPUTER_NAME"
 
 ALLOWED_GROUPS=()
-SSH_ALLOWED_GROUPS=()
 SUDO_APPS=("/usr/bin/systemctl" "/usr/bin/journalctl")
 FEDERATED_DOMAINS=()
 
 [[ -n "$ALLOWED_GROUPS_RAW" ]] && parse_list "$ALLOWED_GROUPS_RAW" ALLOWED_GROUPS
-[[ -n "$SSH_ALLOWED_GROUPS_RAW" ]] && parse_list "$SSH_ALLOWED_GROUPS_RAW" SSH_ALLOWED_GROUPS
 [[ -n "$SUDO_APPS_RAW" ]] && SUDO_APPS=() && parse_list "$SUDO_APPS_RAW" SUDO_APPS
 [[ -n "$FEDERATED_DOMAINS_RAW" ]] && parse_list "$FEDERATED_DOMAINS_RAW" FEDERATED_DOMAINS
 
-if ((${#SSH_ALLOWED_GROUPS[@]} == 0)); then
-  SSH_ALLOWED_GROUPS=("${ALLOWED_GROUPS[@]}")
-fi
 (( ${#ALLOWED_GROUPS[@]} > 0 )) || die "Please provide --allowed-groups with at least one AD group."
 
 echo "Domain: $DOMAIN_LOWER"
 echo "Realm: $REALM"
 echo "Computer Name: $COMPUTER_NAME"
 echo "Allowed login groups: ${ALLOWED_GROUPS[*]}"
-echo "SSH allowed groups: ${SSH_ALLOWED_GROUPS[*]}"
 
 # ── Preflight checks ─────────────────────────────────────────────
 
@@ -402,6 +397,21 @@ if ! host "$DOMAIN_LOWER" >/dev/null 2>&1 && ! nslookup "$DOMAIN_LOWER" >/dev/nu
   die "Cannot resolve $DOMAIN_LOWER via DNS. Fix name resolution before joining."
 fi
 echo "  OK  DNS resolves $DOMAIN_LOWER"
+
+# Computer (NetBIOS) name length/charset. AD caps the computer sAMAccountName at
+# 15 characters; otherwise adcli fails late and cryptically when it tries to
+# create the account (00000523 / ERROR_INVALID_ACCOUNTNAME). Catch it up front,
+# before we touch packages or the hostname.
+echo ""
+echo "Preflight: validating computer name..."
+NETBIOS_NAME="${JOIN_COMPUTER_NAME%%.*}"
+if (( ${#NETBIOS_NAME} > 15 )); then
+  die "Computer name '$NETBIOS_NAME' is ${#NETBIOS_NAME} characters; Active Directory allows at most 15. Re-run with a shorter name, e.g. --computer-name ${NETBIOS_NAME:0:15}"
+fi
+if [[ ! "$NETBIOS_NAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || [[ "$NETBIOS_NAME" =~ ^[0-9]+$ ]]; then
+  die "Computer name '$NETBIOS_NAME' is not a valid AD computer name; use letters, digits, and hyphens, not starting/ending with a hyphen and not all-numeric. Set one with --computer-name <name>."
+fi
+echo "  OK  computer name '$NETBIOS_NAME' (${#NETBIOS_NAME} chars)"
 
 # Already joined? Warn before proceeding.
 if have_cmd realm && realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
@@ -492,17 +502,19 @@ upsert_sshd_setting GSSAPICleanupCredentials yes
 upsert_sshd_setting PasswordAuthentication yes
 upsert_sshd_setting ChallengeResponseAuthentication yes
 
-if ((${#SSH_ALLOWED_GROUPS[@]} > 0)); then
-  ALLOW_GROUP_TOKENS=()
-  for grp in "${SSH_ALLOWED_GROUPS[@]}"; do
-    ALLOW_GROUP_TOKENS+=("$(escape_allowgroup "$grp")")
-  done
-  ALLOW_GROUP_LINE="AllowGroups ${ALLOW_GROUP_TOKENS[*]}"
-  if grep -qE '^[[:space:]]*AllowGroups[[:space:]]+' "$SSHD_CONFIG"; then
-    sed -i -E "s|^[[:space:]]*AllowGroups[[:space:]]+.*|${ALLOW_GROUP_LINE}|" "$SSHD_CONFIG"
-  else
-    echo "$ALLOW_GROUP_LINE" >>"$SSHD_CONFIG"
-  fi
+# Login access is gated by SSSD's simple access provider
+# (access_provider=simple / simple_allow_groups), which `realm permit -g`
+# configured above from --allowed-groups. That matching is case-insensitive.
+#
+# We intentionally do NOT write an sshd AllowGroups line. sshd matches
+# AllowGroups case-sensitively, but SSSD returns AD group names lowercased, so an
+# AllowGroups line built from mixed-case group names silently locks out AD users
+# (observed in the field). Relying on simple_allow_groups mirrors the known-good
+# jc-app01/jc-app02 configuration. Local accounts (e.g. an itadmin in 'sudo')
+# authenticate via local PAM and are unaffected by simple_allow_groups.
+if grep -qE '^[[:space:]]*AllowGroups[[:space:]]+' "$SSHD_CONFIG"; then
+  sed -i -E '/^[[:space:]]*AllowGroups[[:space:]]+/d' "$SSHD_CONFIG"
+  echo "Removed an existing sshd AllowGroups line; access is via simple_allow_groups."
 fi
 
 restart_ssh_service

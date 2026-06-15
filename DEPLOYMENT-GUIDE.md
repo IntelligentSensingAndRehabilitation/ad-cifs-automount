@@ -2,7 +2,9 @@
 
 Full procedure for joining an Ubuntu server to the ric.org AD domain, migrating local user home directories to AD ownership, and setting up Kerberos-authenticated CIFS automounts.
 
-Developed and tested on jc-compute03. Applies to any Ubuntu server in the ric.org / smpp.local environment.
+Developed and tested on jc-compute03 and jc-aurora. Applies to any Ubuntu server in the ric.org environment.
+
+> **fs2 auth domain (May 2026):** the `fs2` NAS now authenticates under **RIC.ORG** (was SMPP.LOCAL). New mounts should use `//fs2.ric.org/CottonLab` and do **not** need `--federated-domains`. `//fs2.smpp.local/...` still resolves for legacy mounts.
 
 ---
 
@@ -65,14 +67,14 @@ Saves to `/var/backups/pre-ad-join-<timestamp>/` with a symlink at `/var/backups
 sudo ./ubuntu-ad-join.sh \
   --domain ric.org \
   --allowed-groups "FS_CottonLab_Read_Write,domain admins,_svc_CottonLab" \
-  --ssh-allowed-groups "FS_CottonLab_Read_Write,domain admins,_svc_CottonLab,sudo" \
   --sudo-group "domain admins" \
-  --federated-domains "smpp.local" \
   --admin-user Administrator \
   --set-fqdn
 ```
 
-**Important:** Include `sudo` in `--ssh-allowed-groups` so your local `itadmin` account can still SSH in. Without it, `AllowGroups` in sshd_config will lock out all non-AD users.
+**Note on the computer name:** AD caps the computer (NetBIOS) name at **15 characters**. If the hostname is longer (e.g. `jcotton-Alienware-Aurora-R7`), pass a short one: `--computer-name jc-aurora`. The script preflights this and fails fast with a clear message rather than letting `adcli` fail cryptically (`00000523 / ERROR_INVALID_ACCOUNTNAME`) partway through.
+
+**Note on access control:** SSH/login access is gated by SSSD's `simple_allow_groups` (configured from `--allowed-groups`), which matches AD group names case-insensitively. The script does **not** write an sshd `AllowGroups` line. Local accounts (e.g. `itadmin`) authenticate via local PAM and are unaffected, so they keep SSH access without needing to be listed anywhere.
 
 **Note on `--set-fqdn`:** If the hostname is already an FQDN (e.g. `jc-compute03.ric.org`), this flag has no effect. On Kubernetes nodes, omit it to avoid re-registering the node under a different name.
 
@@ -193,11 +195,13 @@ ls ~/       # all files intact
 kinit
 klist
 sudo automount-manager.sh install
-sudo automount-manager.sh add CottonLab //fs2.smpp.local/CottonLab
+sudo automount-manager.sh add CottonLab //fs2.ric.org/CottonLab
 sudo automount-manager.sh check CottonLab
 ls /autofs/CottonLab/$USER
 ls ~/CottonLab
 ```
+
+> If a user logs in with their **AD password**, `pam_sss` obtains the Kerberos ticket automatically and the `kinit` above isn't needed. A manual `kinit` is only required for logins that don't carry a password (SSH key, or GSSAPI without delegation). See "Known behaviors" below.
 
 ## 11. Restart Docker containers
 
@@ -262,6 +266,8 @@ sudo chown -R 1002:1002 /home/kshah
 
 ## Known behaviors
 
-- **First login:** Use `user@ric.org` for the first SSH. SSSD hasn't cached the user yet, so short names may be slow to resolve.
+- **First login:** Use `user@ric.org` for the first SSH. SSSD hasn't cached the user yet, so short names may be slow to resolve. After the cache populates, the short name (`ssh user@host`) works.
+- **Kerberos ticket on login:** Password login (`pam_sss`) obtains and caches the TGT automatically, so the automount works with no `kinit`. Login methods without a password (SSH key, or GSSAPI without credential delegation) leave the server keyring empty — those users must `kinit`, or enable GSSAPI delegation client-side. Tickets last ~10 h; the mount goes stale until the next login/`kinit`.
 - **Automount delay on first access:** `getent passwd` in the program map may be slow until SSSD caches the user. Retry after a few seconds.
-- **Troubleshooter SRV warnings:** `WARN - No SRV records for _kerberos._udp.smpp.local` is cosmetic — krb5.conf has explicit KDC entries for SMPP.LOCAL.
+- **Computer name ≤ 15 chars:** AD rejects computer names longer than 15 characters. Long hostnames need `--computer-name <short>`; the join preflight catches this up front.
+- **Legacy smpp.local SRV warnings:** if a host still mounts `//fs2.smpp.local/...`, the troubleshooter may report `WARN - No SRV records for _kerberos._udp.smpp.local` — cosmetic, because krb5.conf has explicit KDC entries for SMPP.LOCAL. Mounts that use `//fs2.ric.org/...` (the current default) don't hit this at all.

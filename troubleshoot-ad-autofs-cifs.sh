@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 
 SERVER_HOST=""
 SHARE=""
@@ -439,7 +439,18 @@ if [[ -f "$SSHD_CFG" ]]; then
   [[ -n "$local_usepam" ]] && status_line PASS "UsePAM: $local_usepam" || status_line WARN "UsePAM not set (recommend: UsePAM yes)"
   [[ -n "$local_gssapi" ]] && status_line PASS "GSSAPIAuthentication: $local_gssapi" || status_line WARN "GSSAPIAuthentication not set"
   [[ -n "$local_gsscleanup" ]] && status_line PASS "GSSAPICleanupCredentials: $local_gsscleanup" || status_line WARN "GSSAPICleanupCredentials not set"
-  [[ -n "$local_allowgroups" ]] && status_line PASS "AllowGroups: $local_allowgroups" || status_line WARN "AllowGroups not set"
+  # Access control lives in SSSD (access_provider=simple / simple_allow_groups),
+  # not in sshd. An AllowGroups line is intentionally NOT used: sshd matches it
+  # case-sensitively while SSSD returns AD group names lowercased, which silently
+  # locks out AD users. So absence of AllowGroups is expected, not a problem.
+  if [[ -n "$local_allowgroups" ]]; then
+    status_line INFO "AllowGroups present: $local_allowgroups (note: AD access is gated by sssd simple_allow_groups, not this)"
+  else
+    status_line INFO "No AllowGroups line (expected — access is gated by sssd simple_allow_groups)"
+  fi
+  local sssd_allow
+  sssd_allow="$(grep -Ei '^[[:space:]]*simple_allow_groups' /etc/sssd/sssd.conf 2>/dev/null | tail -n1 || true)"
+  [[ -n "$sssd_allow" ]] && status_line PASS "sssd ${sssd_allow# }" || status_line WARN "No simple_allow_groups in sssd.conf (login access may be unrestricted or denied)"
 
   if [[ -n "$local_usepam" ]] && ! echo "$local_usepam" | grep -qiE 'UsePAM[[:space:]]+yes'; then
     status_line WARN "UsePAM is not yes (Kerberos/PAM session handling may fail)"
