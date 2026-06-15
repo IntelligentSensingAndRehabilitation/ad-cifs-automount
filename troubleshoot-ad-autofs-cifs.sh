@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 
 SERVER_HOST=""
 SHARE=""
@@ -335,6 +335,65 @@ check_resolver_and_kerberos_dns() {
   fi
 }
 
+# Validate that each *configured* DNS server actually serves AD records.
+# A stale/dead/non-AD DNS server in the resolver list causes SSSD KDC/DC
+# discovery to time out on the first attempt and succeed on retry — the classic
+# "first SSH/sudo fails, immediate retry works" symptom. Querying each server
+# directly pinpoints which one is wrong, rather than only testing the aggregate
+# resolver (which can mask a bad server behind a good one).
+check_dns_servers_serve_ad() {
+  local domain="$1"
+  [[ -z "$domain" ]] && domain="$(hostname -d 2>/dev/null || true)"
+  [[ -z "$domain" ]] && return 0
+
+  section "DNS server validation for ${domain} (AD records)"
+
+  if ! have_cmd dig; then
+    status_line WARN "dig not found (install dnsutils) — cannot validate DNS servers directly"
+    return 0
+  fi
+
+  # systemd-resolved hides the real upstream servers behind the 127.0.0.53 stub
+  # in resolv.conf, so prefer 'resolvectl status'. Fall back to resolv.conf.
+  local servers=()
+  if have_cmd resolvectl; then
+    mapfile -t servers < <(resolvectl status 2>/dev/null | grep -iE 'DNS Server' \
+      | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u)
+  fi
+  if ((${#servers[@]} == 0)) && [[ -f /etc/resolv.conf ]]; then
+    mapfile -t servers < <(awk '/^[[:space:]]*nameserver/ {print $2}' /etc/resolv.conf \
+      | grep -vE '^127\.' | sort -u)
+  fi
+
+  if ((${#servers[@]} == 0)); then
+    status_line WARN "Could not determine upstream DNS servers (only the 127.0.0.53 stub?). Run 'resolvectl status' to see the real servers."
+    return 0
+  fi
+  status_line INFO "Configured upstream DNS server(s): ${servers[*]}"
+
+  # What the domain's SRV records say the AD DNS/DCs should be (via whatever resolves now).
+  local dcs
+  dcs="$(dig +short +time=2 +tries=1 SRV "_ldap._tcp.${domain}" 2>/dev/null | awk '{print $4}' | sed 's/\.$//' | sort -u | tr '\n' ' ')"
+  [[ -n "${dcs// }" ]] && status_line INFO "Domain controllers advertised by _ldap._tcp.${domain}: ${dcs}"
+
+  local s bad=0 ok=0
+  for s in "${servers[@]}"; do
+    if dig +short +time=2 +tries=1 @"$s" SRV "_ldap._tcp.${domain}" 2>/dev/null | grep -q .; then
+      status_line PASS "DNS ${s} answers _ldap._tcp.${domain} (serves AD)"
+      ok=$((ok + 1))
+    else
+      status_line WARN "DNS ${s} did NOT answer _ldap._tcp.${domain} — stale / wrong / unreachable. A dead server here causes first-attempt timeouts that succeed on retry."
+      bad=$((bad + 1))
+    fi
+  done
+
+  if ((bad > 0)); then
+    status_line WARN "${bad} configured DNS server(s) do not serve AD records. Point the resolver only at the AD DNS servers (the DCs above) via netplan/systemd-resolved, then: sudo systemctl restart systemd-resolved sssd"
+  elif ((ok > 0)); then
+    status_line PASS "All ${ok} configured DNS server(s) serve AD records for ${domain}"
+  fi
+}
+
 check_pam_sshd_file() {
   local f="/etc/pam.d/sshd"
   if [[ -f "$f" ]]; then
@@ -597,6 +656,7 @@ if [[ -n "$SHARE" ]]; then
   fi
 fi
 check_resolver_and_kerberos_dns "$SERVER_DOMAIN"
+check_dns_servers_serve_ad "$(hostname -d 2>/dev/null || echo "$SERVER_DOMAIN")"
 
 section "autofs checks"
 fix_nsswitch_automount

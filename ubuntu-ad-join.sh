@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 
 cleanup_on_error() {
   local exit_code=$?
@@ -397,6 +397,24 @@ if ! host "$DOMAIN_LOWER" >/dev/null 2>&1 && ! nslookup "$DOMAIN_LOWER" >/dev/nu
   die "Cannot resolve $DOMAIN_LOWER via DNS. Fix name resolution before joining."
 fi
 echo "  OK  DNS resolves $DOMAIN_LOWER"
+
+# AD DNS sanity: the resolver must serve the domain's SRV records, not just A
+# records. A stale or non-AD DNS server resolves the domain name fine but can't
+# answer _ldap._tcp.<domain> — which makes SSSD's KDC/DC discovery time out, the
+# classic "first SSH/sudo fails, retry works" symptom. Warn (don't block) so a
+# bad resolver is caught before it causes flaky logins post-join.
+if have_cmd dig; then
+  if dig +short +time=3 +tries=2 SRV "_ldap._tcp.${DOMAIN_LOWER}" 2>/dev/null | grep -q .; then
+    echo "  OK  DNS serves AD SRV records (_ldap._tcp.${DOMAIN_LOWER})"
+  else
+    echo "  WARN  DNS resolves ${DOMAIN_LOWER} but returns no _ldap._tcp SRV records." >&2
+    echo "        Your DNS server(s) may be stale or not AD DNS. Point the resolver" >&2
+    echo "        at the domain controllers (check 'resolvectl status') before relying" >&2
+    echo "        on this host — otherwise SSSD/Kerberos discovery may be flaky." >&2
+  fi
+else
+  echo "  INFO 'dig' not present; skipping AD SRV-record check (install dnsutils to enable)."
+fi
 
 # Computer (NetBIOS) name length/charset. AD caps the computer sAMAccountName at
 # 15 characters; otherwise adcli fails late and cryptically when it tries to

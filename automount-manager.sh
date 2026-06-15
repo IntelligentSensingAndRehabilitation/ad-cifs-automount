@@ -20,7 +20,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 TROUBLESHOOT_SCRIPT_NAME="troubleshoot-ad-autofs-cifs.sh"
 
 AUTOFSD_DIR="/etc/auto.master.d"
