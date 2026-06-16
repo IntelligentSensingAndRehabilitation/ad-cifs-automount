@@ -16,7 +16,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.2"
 MIN_UID=1000
 DOMAIN=""
 
