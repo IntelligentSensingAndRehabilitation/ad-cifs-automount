@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 SUFFIX=".local"
 HOME_BASE="/home"
 DRY_RUN="no"

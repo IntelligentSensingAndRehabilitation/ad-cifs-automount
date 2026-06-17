@@ -97,6 +97,14 @@ sudo systemctl status sssd
 
 `id kshah@ric.org` should return an AD uid (e.g. 268060844). `id kshah` (without domain) may still return the local uid if the local account exists — this is expected and handled in the next steps.
 
+**Validate DNS and config with the troubleshooter.** This is the single most useful post-join check — it validates each configured DNS server individually (catching a stale/non-AD server the join's aggregate preflight can miss), plus krb5/sssd/PAM/autofs:
+
+```bash
+sudo ./troubleshoot-ad-autofs-cifs.sh --server-host fs2.ric.org
+```
+
+Pay attention to the **"DNS server validation"** section: every configured server should `PASS`. A `WARN` (e.g. a `10.60.91.x` SMPP.LOCAL KDC handed out by DHCP) means SSSD's backend discovery will be flaky — fix the DNS source (DHCP scope) or pin AD DNS before relying on the host. See "Stale DNS server" under Known behaviors.
+
 ## 6. Check AD/local user overlap
 
 See which local users have matching AD accounts:

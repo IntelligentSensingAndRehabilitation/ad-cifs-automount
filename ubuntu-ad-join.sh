@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 
 cleanup_on_error() {
   local exit_code=$?
@@ -411,6 +411,27 @@ if have_cmd dig; then
     echo "        Your DNS server(s) may be stale or not AD DNS. Point the resolver" >&2
     echo "        at the domain controllers (check 'resolvectl status') before relying" >&2
     echo "        on this host — otherwise SSSD/Kerberos discovery may be flaky." >&2
+  fi
+
+  # Per-server check: the aggregate query above passes if ANY server answers, so
+  # it misses a single stale/non-AD DNS server mixed in with good ones (e.g. a
+  # DHCP scope handing out non-AD KDCs as DNS). Query each configured server
+  # directly to pinpoint a bad one that would cause flaky first-attempt logins.
+  ad_dns_servers=$( { resolvectl status 2>/dev/null | grep -iE 'DNS Server'; \
+                      have_cmd nmcli && nmcli -t dev show 2>/dev/null | grep -i '^IP4.DNS'; } 2>/dev/null \
+                    | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -vE '^127\.' | sort -u || true )
+  ad_dns_bad=0
+  for dsrv in $ad_dns_servers; do
+    if ! dig +short +time=2 +tries=1 @"$dsrv" SRV "_ldap._tcp.${DOMAIN_LOWER}" 2>/dev/null | grep -q .; then
+      echo "  WARN  DNS server ${dsrv} does not serve AD records for ${DOMAIN_LOWER} (stale/non-AD?)." >&2
+      ad_dns_bad=$((ad_dns_bad + 1))
+    fi
+  done
+  if (( ad_dns_bad > 0 )); then
+    echo "        ${ad_dns_bad} configured DNS server(s) don't serve AD — often a DHCP scope handing" >&2
+    echo "        out non-AD DNS. Remove them (or pin AD DNS) or SSSD discovery may be flaky." >&2
+  elif [[ -n "$ad_dns_servers" ]]; then
+    echo "  OK  every configured DNS server serves AD records"
   fi
 else
   echo "  INFO 'dig' not present; skipping AD SRV-record check (install dnsutils to enable)."

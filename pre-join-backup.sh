@@ -14,7 +14,7 @@
 set -euo pipefail
 
 SCRIPT_NAME="$(basename "$0")"
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 BACKUP_BASE="/var/backups"
 LATEST_LINK="${BACKUP_BASE}/pre-ad-join-latest"
 MODE="backup"
