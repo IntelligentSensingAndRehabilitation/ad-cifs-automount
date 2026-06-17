@@ -4,6 +4,12 @@
 
 **Affected:** Ubuntu 22.04 / SSSD 2.6.3 (observed on **jc-compute03**). Boxes on SSSD 2.9.x (Ubuntu 24.04 — jc-app01, jc-app02, jc-aurora) are **not** affected by the same config.
 
+> **Two separate bugs, one symptom.** The "first attempt fails, retry works" behavior can come from *either* of two unrelated causes, both of which knock SSSD's backend offline:
+> 1. **Stale/flaky DNS server** (e.g. a non-AD KDC handed out by DHCP) — backend's DC discovery times out. See DEPLOYMENT-GUIDE → "Stale DNS server".
+> 2. **This SSSD 2.6.3 keytab bug** — backend's GSSAPI LDAP bind is rejected by AD.
+>
+> They look identical at the login/auth-log level. **The tell is in the SSSD backend log** (`/var/log/sssd/sssd_<domain>.log`): a DNS problem shows discovery timeouts, while this bug shows `Client 'host/<fqdn>@REALM' not found ... Unable to create GSSAPI-encrypted LDAP connection`. On jc-compute03, DNS was a real but *coincidental* problem (fixed at the DHCP source); the residual failures are this SSSD bug — confirmed because they persist with clean DNS, and because the same bad DNS on the 2.9.x boxes did **not** produce the symptom.
+
 ### Symptom
 The **first** SSH login or `sudo` after a period of inactivity fails; an **immediate retry succeeds**. Auth log:
 ```
