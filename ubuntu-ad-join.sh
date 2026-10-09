@@ -40,6 +40,7 @@ ADMIN_USER=""             # optional; if empty, prompt
 FEDERATED_DOMAINS_RAW=""  # optional; extra kerberos domains, comma/semicolon-separated
 SET_FQDN="no"             # optional; set system hostname to FQDN before join
 FQDN_OVERRIDE=""          # optional; explicit FQDN to set
+CONFIGURE_ONLY="no"       # optional; skip realm join, just apply post-join config
 
 usage() {
   cat <<EOF
@@ -57,6 +58,9 @@ Options:
   --set-fqdn                        set system hostname to FQDN before join
                                     (omit on Kubernetes nodes — renames the node)
   --fqdn <host.domain>              explicit FQDN (used with --set-fqdn)
+  --configure-only                  skip realm join; re-apply post-join config
+                                    (SSSD, krb5, PAM, sshd, autofs) on an
+                                    already-joined host. No admin password needed.
   -V, --version                     show script version
   -h, --help                        show this help
 EOF
@@ -361,6 +365,7 @@ while (($# > 0)); do
     --federated-domains) FEDERATED_DOMAINS_RAW="${2:-}"; shift 2 ;;
     --set-fqdn) SET_FQDN="yes"; shift 1 ;;
     --fqdn) FQDN_OVERRIDE="${2:-}"; shift 2 ;;
+    --configure-only) CONFIGURE_ONLY="yes"; shift 1 ;;
     -V|--version) echo "${SCRIPT_NAME} ${SCRIPT_VERSION}"; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1" ;;
@@ -383,13 +388,18 @@ FEDERATED_DOMAINS=()
 [[ -n "$SUDO_APPS_RAW" ]] && SUDO_APPS=() && parse_list "$SUDO_APPS_RAW" SUDO_APPS
 [[ -n "$FEDERATED_DOMAINS_RAW" ]] && parse_list "$FEDERATED_DOMAINS_RAW" FEDERATED_DOMAINS
 
-(( ${#ALLOWED_GROUPS[@]} > 0 )) || die "Please provide --allowed-groups with at least one AD group."
+if [[ "$CONFIGURE_ONLY" != "yes" ]]; then
+  (( ${#ALLOWED_GROUPS[@]} > 0 )) || die "Please provide --allowed-groups with at least one AD group."
+fi
 
 echo "Domain: $DOMAIN_LOWER"
 echo "Realm: $REALM"
 echo "Computer Name: $COMPUTER_NAME"
-echo "Allowed login groups: ${ALLOWED_GROUPS[*]}"
+if (( ${#ALLOWED_GROUPS[@]} > 0 )); then
+  echo "Allowed login groups: ${ALLOWED_GROUPS[*]}"
+fi
 
+if [[ "$CONFIGURE_ONLY" != "yes" ]]; then
 # ── Preflight checks ─────────────────────────────────────────────
 
 # DNS check: can we resolve the domain?
@@ -454,62 +464,76 @@ if [[ ! "$NETBIOS_NAME" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || [[ "$N
 fi
 echo "  OK  computer name '$NETBIOS_NAME' (${#NETBIOS_NAME} chars)"
 
-# Already joined? Warn before proceeding.
-if have_cmd realm && realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
+fi  # end preflight (skipped in --configure-only mode)
+
+if [[ "$CONFIGURE_ONLY" == "yes" ]]; then
+  # Verify the machine is already joined before applying config.
+  if ! have_cmd realm || ! realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
+    die "Machine is not joined to $DOMAIN_LOWER. Run without --configure-only to join first."
+  fi
   echo ""
-  echo "WARNING: This machine appears to already be joined to $DOMAIN_LOWER."
-  echo "Re-running realm join will reset the machine account password in AD."
-  echo "This is usually safe, but if it fails mid-way the existing trust may break."
+  echo "-- configure-only: skipping realm join, applying post-join configuration --"
+else
+  # Already joined? Warn before proceeding.
+  if have_cmd realm && realm list 2>/dev/null | grep -qi "$DOMAIN_LOWER"; then
+    echo ""
+    echo "WARNING: This machine appears to already be joined to $DOMAIN_LOWER."
+    echo "Re-running realm join will reset the machine account password in AD."
+    echo "This is usually safe, but if it fails mid-way the existing trust may break."
+    echo ""
+    echo "If you only need to re-apply configuration (SSSD, PAM, sshd, krb5, autofs),"
+    echo "re-run with --configure-only instead — no admin password needed."
+    echo ""
+    read -r -p "Continue with realm join anyway? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
+  fi
+
   echo ""
-  read -r -p "Continue anyway? [y/N] " confirm
-  [[ "$confirm" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
-fi
+  echo "Installing required packages..."
+  apt-get update -y
+  DEPS=(
+    realmd sssd sssd-tools libnss-sss libpam-sss adcli
+    samba-common samba-common-bin krb5-user packagekit
+    oddjob oddjob-mkhomedir cifs-utils keyutils autofs
+  )
+  apt-get install -y "${DEPS[@]}"
 
-echo ""
-echo "Installing required packages..."
-apt-get update -y
-DEPS=(
-  realmd sssd sssd-tools libnss-sss libpam-sss adcli
-  samba-common samba-common-bin krb5-user packagekit
-  oddjob oddjob-mkhomedir cifs-utils keyutils autofs
-)
-apt-get install -y "${DEPS[@]}"
+  have_cmd realm || die "'realm' command not found after installation."
 
-have_cmd realm || die "'realm' command not found after installation."
+  echo "Discovering realm: $DOMAIN_LOWER"
+  realm discover "$DOMAIN_LOWER"
 
-echo "Discovering realm: $DOMAIN_LOWER"
-realm discover "$DOMAIN_LOWER"
-
-if [[ "$SET_FQDN" == "yes" ]]; then
-  TARGET_FQDN="$FQDN_OVERRIDE"
-  if [[ -z "$TARGET_FQDN" ]]; then
+  if [[ "$SET_FQDN" == "yes" ]]; then
+    TARGET_FQDN="$FQDN_OVERRIDE"
+    if [[ -z "$TARGET_FQDN" ]]; then
+      if [[ "$COMPUTER_NAME" == *.* ]]; then
+        TARGET_FQDN="$COMPUTER_NAME"
+      else
+        TARGET_FQDN="${COMPUTER_NAME}.${DOMAIN_LOWER}"
+      fi
+    fi
+    set_system_fqdn "$TARGET_FQDN"
+    JOIN_COMPUTER_NAME="${TARGET_FQDN%%.*}"
+    COMPUTER_NAME="$TARGET_FQDN"
+  else
     if [[ "$COMPUTER_NAME" == *.* ]]; then
-      TARGET_FQDN="$COMPUTER_NAME"
-    else
-      TARGET_FQDN="${COMPUTER_NAME}.${DOMAIN_LOWER}"
+      JOIN_COMPUTER_NAME="${COMPUTER_NAME%%.*}"
     fi
   fi
-  set_system_fqdn "$TARGET_FQDN"
-  JOIN_COMPUTER_NAME="${TARGET_FQDN%%.*}"
-  COMPUTER_NAME="$TARGET_FQDN"
-else
-  if [[ "$COMPUTER_NAME" == *.* ]]; then
-    JOIN_COMPUTER_NAME="${COMPUTER_NAME%%.*}"
+
+  if [[ -z "$ADMIN_USER" ]]; then
+    read -r -p "Enter domain admin username (e.g. Administrator): " ADMIN_USER
   fi
+  [[ -n "$ADMIN_USER" ]] || die "Domain admin username cannot be empty."
+
+  echo "Joining $DOMAIN_LOWER as ${JOIN_COMPUTER_NAME} with user $ADMIN_USER..."
+  realm join --verbose --computer-name="$JOIN_COMPUTER_NAME" -U "$ADMIN_USER" "$DOMAIN_LOWER"
+
+  echo "Permitting AD groups for login..."
+  for grp in "${ALLOWED_GROUPS[@]}"; do
+    realm permit -g "$grp@$DOMAIN_LOWER"
+  done
 fi
-
-if [[ -z "$ADMIN_USER" ]]; then
-  read -r -p "Enter domain admin username (e.g. Administrator): " ADMIN_USER
-fi
-[[ -n "$ADMIN_USER" ]] || die "Domain admin username cannot be empty."
-
-echo "Joining $DOMAIN_LOWER as ${JOIN_COMPUTER_NAME} with user $ADMIN_USER..."
-realm join --verbose --computer-name="$JOIN_COMPUTER_NAME" -U "$ADMIN_USER" "$DOMAIN_LOWER"
-
-echo "Permitting AD groups for login..."
-for grp in "${ALLOWED_GROUPS[@]}"; do
-  realm permit -g "$grp@$DOMAIN_LOWER"
-done
 
 echo "Configuring SSSD, Kerberos, NSS, PAM, and autofs prerequisites..."
 ensure_sssd_config "$DOMAIN_LOWER" "$DOMAIN_UPPER"
@@ -583,7 +607,11 @@ trap - EXIT
 rm -f /tmp/.adjoin-start-marker
 
 echo "=============================="
-echo "Active Directory join complete."
+if [[ "$CONFIGURE_ONLY" == "yes" ]]; then
+  echo "Post-join configuration applied."
+else
+  echo "Active Directory join complete."
+fi
 echo "Domain: $DOMAIN_LOWER"
 echo "Realm: $REALM"
 echo "Configured NSS: passwd/group/shadow + sss, automount: files"
@@ -591,7 +619,9 @@ echo "Configured Kerberos cache: KEYRING:persistent:%{uid}"
 if ((${#FEDERATED_DOMAINS[@]} > 0)); then
   echo "Configured additional krb5 domain_realm mappings: ${FEDERATED_DOMAINS[*]}"
 fi
-echo "Login access restricted to groups: ${ALLOWED_GROUPS[*]}"
+if (( ${#ALLOWED_GROUPS[@]} > 0 )); then
+  echo "Login access restricted to groups: ${ALLOWED_GROUPS[*]}"
+fi
 echo "You can test as an AD user:"
 echo "  klist"
 echo "  id <ad-user>"
