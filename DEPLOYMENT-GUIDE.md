@@ -20,9 +20,10 @@ Developed and tested on jc-compute03 and jc-aurora. Applies to any Ubuntu server
 8. [Remove orphaned local accounts](#8-remove-orphaned-local-accounts)
 9. [SSH in as AD user and verify](#9-ssh-in-as-ad-user-and-verify)
 10. [Install automount-manager and add mounts](#10-install-automount-manager-and-add-mounts)
-11. [Restart Docker containers](#11-restart-docker-containers)
-12. [Backup working config](#12-backup-working-config)
-13. [Rollback procedure](#13-rollback-procedure)
+11. [Enable Kerberos ticket renewal](#11-enable-kerberos-ticket-renewal)
+12. [Restart Docker containers](#12-restart-docker-containers)
+13. [Backup working config](#13-backup-working-config)
+14. [Rollback procedure](#14-rollback-procedure)
 
 ---
 
@@ -209,9 +210,85 @@ ls /autofs/CottonLab/$USER
 ls ~/CottonLab
 ```
 
-> If a user logs in with their **AD password**, `pam_sss` obtains the Kerberos ticket automatically and the `kinit` above isn't needed. A manual `kinit` is only required for logins that don't carry a password (SSH key, or GSSAPI without delegation). See "Known behaviors" below.
+## 11. Enable Kerberos ticket renewal
 
-## 11. Restart Docker containers
+CIFS mounts use `sec=krb5`, so each user needs a valid Kerberos ticket. Without renewal, tickets expire after ~10 hours and mounts stop working — including inside Docker containers that bind-mount host CIFS paths.
+
+Add these two lines to `/etc/sssd/sssd.conf` under `[domain/ric.org]`:
+
+```ini
+krb5_renewable_lifetime = 7d
+krb5_renew_interval = 60m
+```
+
+```bash
+sudo systemctl restart sssd
+```
+
+**New joins already include these settings** as of the update to `ubuntu-ad-join.sh`. This step is only needed for hosts joined before that change.
+
+### How it works
+
+SSSD automatically renews tickets it obtained via password login (`pam_sss`). With these settings, a single password login gives the user up to 7 days of uninterrupted CIFS access with no manual `kinit`.
+
+### What counts as a password login
+
+| Method | Triggers SSSD renewal? |
+|---|---|
+| `ssh user@host` with AD password | Yes |
+| `ssh -o PreferredAuthentications=password user@host` | Yes (forces password) |
+| `su - user` with AD password | Yes |
+| `sudo` (when it prompts for your AD password) | Yes |
+| Graphical login / lock screen unlock | Yes |
+| SSH with public key (`Accepted publickey`) | **No** |
+| SSH with GSSAPI (`Accepted gssapi-with-mic`) | **No** |
+| Manual `kinit` on the command line | **No** |
+
+SSSD renews at approximately the half-life of the ticket (e.g. ~5 hours into a 10-hour ticket), checking at the `krb5_renew_interval` frequency. Renewal produces a new `Valid starting` / `Expires` while `renew until` stays fixed at the original 7-day ceiling.
+
+### Verification
+
+After restarting SSSD, log in **with a password** (or trigger a `sudo` password prompt), then:
+
+```bash
+klist    # should show "renew until" ~7 days out
+```
+
+Check the auth log to confirm the login method:
+
+```bash
+sudo grep "$USER" /var/log/auth.log | grep 'Accepted' | tail -5
+# Want: "Accepted password"
+```
+
+To confirm automatic renewal is working, wait past the ticket half-life and run `klist` again. `Valid starting` and `Expires` should have advanced while `renew until` stays the same. Do not type your password or `sudo` during the wait — that would obtain a fresh ticket rather than renewing.
+
+### Docker containers and Kerberos tickets
+
+Containers that bind-mount a host directory under a CIFS share (e.g. `source=/home/user/CottonLab/...,target=/mnt/...,type=bind`) inherit the host's CIFS authentication. The container has no Kerberos tools — the ticket belongs to the host user. When the host ticket expires, the bind mount inside the container shows `Permission denied` / `d?????????`.
+
+The fix is always host-side: ensure the host user has a valid, auto-renewed ticket. SSSD renewal (via password login) handles this automatically. For users who only SSH with keys, they need one password login per week.
+
+### Fallback: keytab + cron (SSH-key-only users with long jobs)
+
+If a user cannot password-login (e.g. automated pipelines), a per-user keytab provides fully unattended renewal:
+
+```bash
+# Create keytab (as the user, requires their AD password once)
+ktutil
+addent -password -p user@RIC.ORG -k 1 -e aes256-cts-hmac-sha1-96
+wkt /home/user/.krb5.keytab
+quit
+chmod 600 /home/user/.krb5.keytab
+
+# Automate via cron
+crontab -e
+# 0 * * * * /usr/bin/kinit -kt /home/user/.krb5.keytab user@RIC.ORG 2>/dev/null
+```
+
+The keytab breaks on password change and must be regenerated. Treat it like a password (`chmod 600`, user-owned).
+
+## 12. Restart Docker containers
 
 Restart any containers that bind-mount from chowned home directories:
 
@@ -220,13 +297,13 @@ docker restart isr_dev_kshah grafana-c prometheus-c dcgm-exporter-c beautiful_pe
 docker ps
 ```
 
-## 12. Backup working config
+## 13. Backup working config
 
 ```bash
 sudo automount-manager.sh backup
 ```
 
-## 13. Rollback procedure
+## 14. Rollback procedure
 
 ### If SSH breaks (from console/IPMI)
 
@@ -277,6 +354,9 @@ sudo chown -R 1002:1002 /home/kshah
 - **First login:** Use `user@ric.org` for the first SSH. SSSD hasn't cached the user yet, so short names may be slow to resolve. After the cache populates, the short name (`ssh user@host`) works.
 - **Kerberos ticket on login:** Password login (`pam_sss`) obtains and caches the TGT automatically, so the automount works with no `kinit`. Login methods without a password (SSH key, or GSSAPI without credential delegation) leave the server keyring empty — those users must `kinit`, or enable GSSAPI delegation client-side. Tickets last ~10 h; the mount goes stale until the next login/`kinit`.
 - **Automount delay on first access:** `getent passwd` in the program map may be slow until SSSD caches the user. Retry after a few seconds.
+- **Kerberos ticket expiry (~10 h):** AD grants 10-hour tickets. Without SSSD renewal, CIFS mounts die after ~10 h (or immediately on SSH logout for GSSAPI-delegated tickets). See [step 11](#11-enable-kerberos-ticket-renewal). Users need one password-based action per week (SSH password login, `sudo` prompt, or graphical login) to keep SSSD renewing their ticket, or use a keytab for fully unattended work.
+- **GSSAPI delegation is unsuitable for unattended work:** `GSSAPICleanupCredentials yes` destroys the delegated ticket on logout. A long-running job's mount dies the moment the user disconnects. Delegation is fine for interactive VS Code sessions; never for background jobs.
+- **Docker bind mounts from CIFS paths:** The container has no Kerberos — the host ticket authenticates the mount. If autofs unmounts the underlying path on idle timeout, Docker's bind stays pinned to the detached mount and won't recover without a container restart, even after `kinit`. See [step 11](#11-enable-kerberos-ticket-renewal) for the full explanation.
 - **Computer name ≤ 15 chars:** AD rejects computer names longer than 15 characters. Long hostnames need `--computer-name <short>`; the join preflight catches this up front.
 - **Stale DNS server → "first attempt fails, retry works":** if the resolver lists a dead/stale/non-AD DNS server, SSSD's KDC/DC discovery tries it first, times out, then falls back to a working server on retry — producing intermittent first-attempt SSH/sudo failures (seen on jc-compute03; fixed by correcting the DNS server IPs). Such a server resolves plain A records but can't answer `_ldap._tcp.<domain>` SRV. **Checks:** `ubuntu-ad-join.sh` preflights AD SRV records before joining, and `troubleshoot-ad-autofs-cifs.sh` validates **each configured DNS server individually** (via `resolvectl`/`dig @<server> SRV _ldap._tcp.<domain>`) and flags any that don't serve AD. Fix by pointing the resolver only at the domain controllers, then `sudo systemctl restart systemd-resolved sssd`.
 - **Legacy smpp.local SRV warnings:** if a host still mounts `//fs2.smpp.local/...`, the troubleshooter may report `WARN - No SRV records for _kerberos._udp.smpp.local` — cosmetic, because krb5.conf has explicit KDC entries for SMPP.LOCAL. Mounts that use `//fs2.ric.org/...` (the current default) don't hit this at all.

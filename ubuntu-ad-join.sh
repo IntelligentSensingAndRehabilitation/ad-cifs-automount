@@ -242,6 +242,8 @@ EOF
   upsert_ini_option "$f" "$dsection" "fallback_homedir" "/home/%u"
   upsert_ini_option "$f" "$dsection" "default_shell" "/bin/bash"
   upsert_ini_option "$f" "$dsection" "krb5_ccname_template" "KEYRING:persistent:%U"
+  upsert_ini_option "$f" "$dsection" "krb5_renewable_lifetime" "7d"
+  upsert_ini_option "$f" "$dsection" "krb5_renew_interval" "60m"
 
   chown root:root "$f"
   chmod 600 "$f"

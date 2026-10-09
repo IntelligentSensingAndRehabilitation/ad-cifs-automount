@@ -157,7 +157,7 @@ sudo ./automount-manager.sh --restore /var/backups/automount-manager/backup-2026
 Legacy folder-style backups are also accepted by `--restore`.
 
 ## Per-user mount flow
-1) User SSHes in, gets a ticket: `kdestroy; kinit`.
+1) User SSHes in with their AD password. SSSD (`pam_sss`) obtains a Kerberos ticket and renews it automatically (requires `krb5_renewable_lifetime` and `krb5_renew_interval` in `sssd.conf` — set by `ubuntu-ad-join.sh`).
 2) Access triggers autofs: `ls /autofs/Lab1/$USER`.
 3) autofs runs `/etc/auto.Lab1`, resolves `cruid=<user_uid>`, mounts CIFS with `multiuser`.
 4) Symlink `~/Lab1` appears via `/etc/profile.d/automount-links.sh`.
